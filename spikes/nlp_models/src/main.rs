@@ -304,6 +304,7 @@ fn to_json(sents: &[SentenceOut]) -> Vec<SentenceJson> {
             end: s.end,
             text: s.text.clone(),
             tokens: s.tokens.iter().map(TokenOut::from).collect(),
+            // (offsets in `tokens` are absolute into the group text)
         })
         .collect()
 }

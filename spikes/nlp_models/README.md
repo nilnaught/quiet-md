@@ -26,6 +26,8 @@ spikes/nlp_models/
     export_english_upos.py   ← tagger + SuPar parser → ONNX（带数值校验）
     compare_spacy.py         ← spaCy en_core_web_trf 对照 → compare-en.json
     report_error_cases.py    ← 生成 error-cases.md
+    screenshot_demo.py       ← Chrome headless 截图 + 裁掉空白 → demo.png
+    gen_eisner_ref.py        ← ltp_core Eisner 的 golden 矩阵（仅比对用）
   fixtures/sentences.json
 ```
 
@@ -42,20 +44,23 @@ export HF_HOME=/workspace/models/hf-cache
 /workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/export_english_upos.py
 
 # 3) Rust CLI（独立 crate；首次编译会下载 ORT 预编译库）
-cargo run --release --manifest-path spikes/nlp_models/Cargo.toml -- \
+#    模型加载 ~6.5 s、~3.6 GiB RSS，务必加 timeout
+timeout 600 cargo run --release --manifest-path spikes/nlp_models/Cargo.toml -- \
   --models-dir /workspace/models \
   --out-dir /workspace/spike-out \
-  --input spikes/nlp_models/fixtures/sentences.json
+  --input spikes/nlp_models/fixtures/sentences.json \
+  --compare-dir /tmp/spike-cmp   # 可选：导出 20 句英文，供 compare_spacy.py 用
+
+# 3b) 单元测试（始终加 timeout）
+timeout 120 cargo test --release --manifest-path spikes/nlp_models/Cargo.toml
 
 # 4) spaCy 对照 + 出错用例报告
 HF_HOME=/workspace/models/hf-cache /workspace/.venv-nlp/bin/python \
   spikes/nlp_models/scripts/compare_spacy.py
 /workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/report_error_cases.py
 
-# 5) 截图
-/usr/bin/google-chrome-stable --headless=new --disable-gpu --no-sandbox \
-  --hide-scrollbars --force-device-scale-factor=2 --window-size=1180,7000 \
-  --screenshot=/workspace/spike-out/demo.png file:///workspace/spike-out/demo.html
+# 5) 截图（Chrome headless 渲染后按内容裁边）
+/workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/screenshot_demo.py
 ```
 
 产物：`/workspace/spike-out/{tokens.json,demo.html,demo.png,metrics.json,compare-en.json,error-cases.md}`。
@@ -169,6 +174,17 @@ HF_HOME=/workspace/models/hf-cache /workspace/.venv-nlp/bin/python \
   可能被标成核心谓语。
 * `demo.html` 按 group 原文的字节空隙回插空白，避免英文 token 连写。
 * 英文 parser 内嵌第二份 roberta-large，体积大（见 EXPORT.md §3）。
+* **依存解码不是投射 Eisner**：`decode_eisner` 目前是「贪心最优 head + 破环
+  + 修复单根」的解码器（`decode_mst`）。原因见 EXPORT.md §5：
+  `ltp_core.algorithms.eisner` 的 `stripe()` 把 `C[i,r]` 与 `C[j-1-r,j]` 配对，
+  并非教科书递推；我们尝试过的投射 DP 版本过不了对拍与穷举最优性测试，因此
+  没有发布。实测 fixtures 的英文 3 句与 `esupar` 官方 head 逐词一致，
+  中文与 LTP 的 head 在绝大多数词上一致（见 EXPORT.md §5）。
+  `cargo test` 覆盖：随机矩阵必为合法树、不会优于穷举最优解。
 * CWS 分词在极少数句子会与 LTP Python `pipeline()` 的最终分词略有差异
   （Python 端有多一步 `Hook` 重分段，ONNX 刻意不导出）；POS/依存不受影响。
-* LTP 代词 `r` 的粗类映射仍会落到 ADV（如「她」被着成副词色），不影响分词。
+* LTP 粗类映射（`pipeline.rs::zh_coarse`）：`z`（轻轻地、金黄）着形容词色；
+  `r`（代词：她/我们）着副词色（LTP 标签体系里 `r` 与 `d` 并列），这是
+  一个已知的颜色瑕疵，原始标签仍在 `upos_or_ltp_tag` 里。
+* LTP 会把「孩子们」切成「孩子」+「们」（`k`，后缀），与 LTP 一致；旧原型
+  的问题是把「孩子」整词错标，现已纠正为名词 `n`。

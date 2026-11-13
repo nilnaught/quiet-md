@@ -248,6 +248,27 @@ mod tests {
         }
     }
 
+    /// Regression: a sentence with several Han runs must map each run-relative
+    /// word offset to `sentence_start + run_start + word_offset`.
+    #[test]
+    fn mixed_multi_run_offsets_are_absolute() {
+        let s = "她 quietly opened the 旧书，and read every 句子。";
+        for sp in sentences(s) {
+            for (kind, run) in split_scripts(&sp.text) {
+                if kind != ScriptKind::Han {
+                    continue;
+                }
+                // simulate two char-level words inside the run
+                let mid = run.text.char_indices().nth(1).map(|(i, _)| i).unwrap_or(run.text.len());
+                for (a, b) in [(0, mid), (mid, run.text.len())] {
+                    let abs_a = sp.start + run.start + a;
+                    let abs_b = sp.start + run.start + b;
+                    assert_eq!(&s[abs_a..abs_b], &run.text[a..b], "run {:?}", run.text);
+                }
+            }
+        }
+    }
+
     #[test]
     fn mixed_paragraph_sentence_offsets() {
         let s = "她 quietly opened the 旧书。The tired 孩子们睡着了，so I closed the window.";

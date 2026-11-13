@@ -22,13 +22,27 @@ Two graphs, because esupar is *two* models:
      ``rel_logits`` and the Rust CLI decodes the tree.
 
 Usage:
+  # large (already exported, fp32 kept in /workspace/models/en-upos-large/onnx)
   HF_HOME=/workspace/models/hf-cache /workspace/.venv-nlp/bin/python \
     spikes/nlp_models/scripts/export_english_upos.py \
     --model /workspace/models/en-upos-large --out /workspace/models/en-upos-large/onnx
+
+  # base (the HF snapshot is staged with symlinks by stage_en_base.py; the
+  # weights themselves are never copied — 500 MB bin + 527 MB esupar stay in
+  # the HF cache)
+  HF_HOME=/workspace/models/hf-cache timeout 900 /workspace/.venv-nlp/bin/python \
+    spikes/nlp_models/scripts/export_english_upos.py \
+    --model /workspace/models/en-upos-base \
+    --out   /workspace/models/en-upos-base/onnx
+
+The script also prints a torch-vs-ONNX check on a few fixture-like sentences
+(tagger argmax labels + parser heads, not just logits) so an export that
+"runs" but produces garbage does not slip through.
 """
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -171,6 +185,10 @@ def main():
     ap.add_argument("--out", default="/workspace/models/en-upos-large/onnx")
     ap.add_argument("--skip-tagger", action="store_true")
     ap.add_argument("--skip-parser", action="store_true")
+    ap.add_argument("--skip-verify", action="store_true",
+                    help="skip the torch-vs-ONNX sentence check (saves a few seconds)")
+    ap.add_argument("--verify-only", action="store_true",
+                    help="only run the torch-vs-ONNX check on an existing export")
     args = ap.parse_args()
 
     os.environ.setdefault("HF_HOME", "/workspace/models/hf-cache")
@@ -180,6 +198,10 @@ def main():
     from esupar.supar.utils import Dataset
 
     parser = Parser.load(os.path.join(args.model, "esupar.model"), safe_tensor=True)
+    if args.verify_only:
+        verify_sentences(args.model, args.out)
+        return
+
     parser.transform.eval()
     parser.model.eval()
 
@@ -198,8 +220,12 @@ def main():
         )
         # torch writes en_upos_tagger.onnx.data next to it automatically
         tok.save_pretrained(os.path.join(args.out, "tokenizer"))
+        import transformers
+        tcfg = transformers.AutoConfig.from_pretrained(args.model)
         json.dump({"id2label": tagger.config.id2label,
-                   "model": "KoichiYasuoka/roberta-large-english-upos",
+                   "model": getattr(tcfg, "_name_or_path", args.model),
+                   "hidden_size": tagger.config.hidden_size,
+                   "num_hidden_layers": tagger.config.num_hidden_layers,
                    "task": "TokenClassification: packed UPOS+FEATS",
                    "note": "Multi-word labels contain '+'; the pipeline maps them onto several tokens."},
                   open(os.path.join(args.out, "tagger_labels.json"), "w"), indent=1)
@@ -250,10 +276,12 @@ def main():
         "inputs": ["subword_ids", "word_ids", "piece_order"],
         "outputs": ["arc_logits", "rel_logits"],
         "labels": list(parser.REL.vocab),
-        "word_vocab_size": 15721,
+        "word_vocab_size": int(parser.model.word_embed.num_embeddings),
         "word_bos_index": 2, "word_unk_index": 1, "word_pad_index": 0,
         "subword_pad_index": 1,
-        "bert_n_layers": 4, "bert_max_len": 512,
+        "bert_n_layers": int(getattr(parser.model.bert_embed, "n_layers", 4)),
+        "bert_max_len": int(getattr(parser.model.bert_embed, "max_len", 512)),
+        "bert_hidden_size": int(parser.model.bert_embed.bert.config.hidden_size),
         "notes": {
             "word_ids": "BOS(2) prepended, then word vocab ids (lowercased FORM); OOV -> 1 (unk)",
             "subwords": "roberta BPE pieces per word, NO <s>/</s>; pad id 1",
@@ -271,6 +299,99 @@ def main():
     print("ort arc maxdiff", float(np.abs(o[0] - ref_arc.numpy()).max()))
     heads = o[0][:, 1:, :].argmax(-1)
     print("ort argmax heads (before Eisner):", heads.tolist())
+
+    if not args.skip_verify:
+        verify_sentences(args.model, args.out,
+                         tagger if not args.skip_tagger else None,
+                         tok if not args.skip_tagger else None)
+
+
+# --------------------------------------------------------------------------- #
+# torch-vs-ONNX sentence check (labels + heads, not only logits)
+# --------------------------------------------------------------------------- #
+VERIFY_SENTS = [
+    "The clever young fox quietly crossed the dark river.",
+    "Having finished dinner, they started a movie.",
+    "The man who lives next door is a famous writer.",
+    "She decided to leave the party early.",
+]
+
+
+def verify_sentences(model_dir, out_dir, tagger=None, tokenizer=None):
+    import onnxruntime as ort
+    from transformers import AutoModelForTokenClassification, AutoTokenizer
+    from esupar.supar import Parser
+    from esupar.supar.utils.field import SubwordField
+
+    tok = tokenizer if tokenizer is not None else AutoTokenizer.from_pretrained(model_dir)
+    tg = (tagger if tagger is not None
+          else AutoModelForTokenClassification.from_pretrained(model_dir).eval())
+    parser = Parser.load(os.path.join(model_dir, "esupar.model"), safe_tensor=True)
+    parser.transform.eval(); parser.model.eval()
+    fields = parser.transform.FORM  # esupar CoNLL: FORM is the field tuple
+    sub = next(f for f in fields if isinstance(f, SubwordField))
+
+    t_sess = ort.InferenceSession(os.path.join(out_dir, "en_upos_tagger.onnx"), providers=["CPUExecutionProvider"])
+    p_sess = ort.InferenceSession(os.path.join(out_dir, "en_supar_parser.onnx"), providers=["CPUExecutionProvider"])
+    net = ParserGraph(parser).eval()
+
+    report = {"sentences": [], "tagger": {}, "parser": {}}
+    max_tag_dlogit = 0.0
+    max_arc = max_rel = 0.0
+    tag_argmax_equal = 0
+    tag_total = 0
+    head_equal = head_total = 0
+    for sent in VERIFY_SENTS:
+        enc = tok(sent, return_tensors="pt")
+        with torch.no_grad():
+            logits = tg(**enc).logits
+        o = t_sess.run(None, {"input_ids": enc["input_ids"].numpy(),
+                              "attention_mask": enc["attention_mask"].numpy()})[0]
+        max_tag_dlogit = max(max_tag_dlogit, float(np.abs(o - logits.numpy()).max()))
+        a, b = o.argmax(-1)[0], logits.argmax(-1)[0].numpy()
+        tag_argmax_equal += int((a == b).sum()); tag_total += int(a.shape[0])
+
+        words = [w for w in re.split(r"\s+", sent) if w]
+        sub_tokens = [sub.transform([w]) for w in words]
+        F = max(len(x) for x in sub_tokens)
+        rows = len(words) + 2
+        # word ids via the Field's vocab (lowercased, OOV -> 1)
+        from esupar.supar.utils.field import Field
+        wf = next(f for f in fields if isinstance(f, Field) and not isinstance(f, SubwordField))
+        wids = [2] + [wf.vocab[w.lower()] if w.lower() in wf.vocab else 1 for w in words] + [0]
+        sub_ids = np.ones((rows, F), dtype=np.int64); sub_ids[0, 0] = 0
+        for i, st in enumerate(sub_tokens):
+            for k, t in enumerate(st):
+                t = t.reshape(-1)
+                sub_ids[i + 1, k] = int(t[0].item()) if t.numel() else 1
+        order = np.argsort((sub_ids == 1).reshape(-1), kind="stable").astype(np.int64)
+        with torch.no_grad():
+            wids_t = torch.tensor([wids])
+            sub_t = torch.tensor(sub_ids)[None]
+            ord_t = torch.tensor(order)[None]
+            ra, rr = net(sub_t, wids_t, ord_t)
+        oa, orr = p_sess.run(None, {"subword_ids": sub_ids[None], "word_ids": np.array([wids], dtype=np.int64),
+                                    "piece_order": order[None]})
+        max_arc = max(max_arc, float(np.abs(oa - ra.numpy()).max()))
+        max_rel = max(max_rel, float(np.abs(orr - rr.numpy()).max()))
+        ha = oa[0][1:, :].argmax(-1); hr = ra.numpy()[0][1:, :].argmax(-1)
+        head_equal += int((ha == hr).sum()); head_total += len(ha)
+        report["sentences"].append({
+            "text": sent,
+            "words": words,
+            "torch_argmax_subwords": [int(x) for x in a],
+            "ort_argmax_subwords": [int(x) for x in b],
+            "ort_heads": [int(x) for x in ha],
+        })
+    report["tagger"] = {"max_abs_logit_diff": max_tag_dlogit,
+                        "subword_argmax_agreement": tag_argmax_equal / max(tag_total, 1)}
+    report["parser"] = {"max_arc_diff": max_arc, "max_rel_diff": max_rel,
+                        "argmax_head_agreement": head_equal / max(head_total, 1)}
+    json.dump(report, open(os.path.join(out_dir, "verify_vs_torch.json"), "w"), indent=1)
+    print("VERIFY", json.dumps({"tagger": report["tagger"], "parser": report["parser"]}))
+    ok = (report["tagger"]["subword_argmax_agreement"] == 1.0
+          and report["parser"]["argmax_head_agreement"] == 1.0)
+    print("VERIFY OK" if ok else "VERIFY MISMATCH (see verify_vs_torch.json)")
 
 
 if __name__ == "__main__":

@@ -59,13 +59,17 @@ impl Pipeline {
             let mut run_id = 0usize;
             for (kind, run) in text::split_scripts(&sent.text) {
                 match kind {
-                    ScriptKind::Latin => latin_runs.push(run),
+                    ScriptKind::Latin => {
+                        debug_assert_eq!(run.text, sent.text[run.start..run.end]);
+                        latin_runs.push(run);
+                    }
                     ScriptKind::Han => {
                         self.flush_latin(&mut latin_runs, si, sent.start, run_id, &mut toks)?;
                         run_id += 1;
                         let Some(ltp) = self.ltp.as_mut() else {
                             continue;
                         };
+                        debug_assert_eq!(run.text, sent.text[run.start..run.end], "han run offsets");
                         let words = ltp.segment(&run.text)?;
                         let parsed = ltp.parse(&run.text, &words)?;
                         let n = parsed.len();

@@ -100,6 +100,17 @@ fn mixed_byte_offsets_round_trip_and_no_core_adjective() {
 }
 
 #[test]
+fn fallback_engine_ignores_workspace_models() {
+    // /workspace/models exists on the development box; the engine must only use
+    // the explicit dir so clippy/tests behave the same on CI and locally.
+    let engine = fallback_engine();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!engine.neural_ready());
+    let a = engine.analyze("She is a famous writer. 她安静地打开了旧书。");
+    assert_eq!(a.source, AnalysisSource::Fallback);
+}
+
+#[test]
 fn paragraphs_split_at_blank_lines() {
     let engine = fallback_engine();
     let text = "First one.\nStill first.\n\n\nSecond para.\n";

@@ -46,8 +46,12 @@ impl Default for NlpOptions {
 /// 2. the models directory bundled with the app (macOS
 ///    `Contents/Resources/models`, or a `models/` folder next to the
 ///    executable on Windows / Linux)
-/// 3. `/workspace/models` when that path exists (this development box)
+/// 3. `/workspace/models` when that path exists (this development box, and
+///    only then: debug builds, examples and tests run there)
 /// 4. `<cwd>/models`
+///
+/// Release builds skip 3 and 4 so a shipped binary always uses its bundle (or
+/// the fallback) and never models that happen to sit in the working directory.
 ///
 /// A missing directory is fine: [`NlpEngine::analyze`] stays on the
 /// jieba / english-pos-tagger fallback.
@@ -57,6 +61,10 @@ fn default_models_dir() -> PathBuf {
     }
     if let Some(dir) = bundled_models_dir() {
         return dir;
+    }
+    // Shipped binaries: no development-only fallbacks (see the doc comment).
+    if !cfg!(debug_assertions) {
+        return bundled_models_dir().unwrap_or_default();
     }
     let box_default = PathBuf::from("/workspace/models");
     if box_default.is_dir() {

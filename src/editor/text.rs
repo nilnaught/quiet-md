@@ -230,6 +230,9 @@ pub struct TextSpec {
     pub font: Option<&'static str>,
     /// Everything italic (a theme's quotes).
     pub italic: bool,
+    /// The colour behind the text, for washes that must fade it (阅读标注's
+    /// 未读淡化); the page's own by default.
+    pub paper: Option<Hsla>,
 }
 
 impl TextSpec {
@@ -249,6 +252,7 @@ impl TextSpec {
             doc_font: true,
             font: None,
             italic: false,
+            paper: None,
         }
     }
 }
@@ -284,6 +288,8 @@ pub struct RichTextElement {
     /// Unwrapped text as wide as its longest line (at least the parent), for
     /// a scroller around it: a code block that doesn't wrap (#161).
     pub fit_content: bool,
+    /// 阅读标注: the block's marks, current unit and 未读淡化 (`reading_nlp.rs`).
+    pub overlay: Option<Rc<super::reading_nlp::Overlay>>,
 }
 
 pub struct Prepared {
@@ -799,6 +805,9 @@ impl Element for RichTextElement {
         } else {
             let hl = self.highlight.as_ref().map(|f| f(&self.text.text));
             let mut runs = build_runs(&self.text, &self.spec, self.marked.as_ref(), hl.as_ref());
+            if let Some(ov) = &self.overlay {
+                runs = crate::editor::reading_nlp::color_runs(self.text.text.len(), runs, ov);
+            }
             let mut text = self.text.text.clone();
             for (r, m) in self.text.spans() {
                 let Some(obj) = m.inline.as_ref() else { continue };
@@ -1118,6 +1127,11 @@ impl Element for RichTextElement {
         for (hi, (_, line)) in layout.lines.iter().enumerate() {
             let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
             let _ = line.paint_rows(o, lh, &tops, gpui_align, Some(bounds), window, cx);
+        }
+        // 阅读标注 over the glyphs: connective / non-finite lines, core dots,
+        // the current unit's band and the faded unread tail.
+        if self.overlay.is_some() {
+            self.paint_reading(layout, o, window);
         }
         for eq in prepaint.placed.iter() {
             let o = eq.origin;

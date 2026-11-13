@@ -1,0 +1,30 @@
+[package]
+name = "reader_nlp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline CN/EN POS + dependency analysis and derived reader marks (ONNX Runtime), with a jieba/Brill fallback"
+
+[dependencies]
+anyhow = "1.0.104"
+english-pos-tagger = "0.2.0"
+jieba-rs = "0.11.0"
+ndarray = "0.16"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+  "std",
+  "ndarray",
+  "download-binaries",
+  "copy-dylibs",
+  "tls-native",
+  "api-31",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokenizers = { version = "0.22", default-features = false, features = [
+  "onig",
+  "progressbar",
+] }
+unicode-script = "0.5"
+
+[lints]
+workspace = true

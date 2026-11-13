@@ -55,6 +55,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 [Files]
 Source: "{#AppSource}\quiet_md.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppSource}\vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#AppSource}\onnxruntime*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#AppSource}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
 Source: "..\..\LICENSE"; DestDir: "{app}"
 Source: "..\..\THIRD_PARTY.md"; DestDir: "{app}"
 

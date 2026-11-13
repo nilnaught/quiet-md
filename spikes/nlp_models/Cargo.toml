@@ -1,0 +1,37 @@
+[package]
+name = "nlp_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline neural CN/EN POS + dependency spike for quiet-md (ONNX Runtime via ort)"
+
+# NOTE: intentionally NOT a member of the root workspace. The spike lives in its
+# own cargo project so its heavy deps (ort / onnxruntime dylibs) never leak into
+# the app build. Build with:
+#   cargo run --release --manifest-path spikes/nlp_models/Cargo.toml
+[dependencies]
+anyhow = "1"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+  "std",
+  "ndarray",
+  "download-binaries",
+  "copy-dylibs",
+  "tls-native",
+  "api-31",
+] }
+ndarray = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.22", default-features = false, features = [
+  "onig",
+  "progressbar",
+] }
+icu_segmenter = "2.4"
+unicode-script = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Detach from the repo's workspace so `cargo` for the app never builds ort.
+[workspace]

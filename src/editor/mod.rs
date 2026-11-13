@@ -20,6 +20,7 @@ pub mod menus;
 mod overlays;
 mod numbering;
 mod reading;
+mod reading_nlp;
 mod scrollbar;
 pub mod reminder;
 mod render;

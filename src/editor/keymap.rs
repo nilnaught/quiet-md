@@ -74,6 +74,10 @@ actions!(
         AlignRight,
         MoveBlockUp,
         MoveBlockDown,
+        /// 逐步阅读: next / previous sentence (or paragraph), and the unit switch.
+        ReaderNext,
+        ReaderPrev,
+        ReaderToggleUnit,
     ]
 );
 
@@ -118,6 +122,14 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-s", Save, c),
         ]);
     }
+    // 逐步阅读 (`reading_nlp.rs`): only in 阅读模式, and only while the
+    // overlay is on; the handlers pass otherwise.
+    cx.bind_keys([
+        KeyBinding::new("space", ReaderNext, Some("EditorRO")),
+        KeyBinding::new("right", ReaderNext, Some("EditorRO")),
+        KeyBinding::new("left", ReaderPrev, Some("EditorRO")),
+        KeyBinding::new("tab", ReaderToggleUnit, Some("EditorRO")),
+    ]);
     let c = Some("Editor");
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, c),

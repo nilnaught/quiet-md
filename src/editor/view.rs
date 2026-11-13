@@ -250,6 +250,23 @@ pub struct Editor {
     pub(super) ro_doc: Option<crate::model::Document>,
     /// The 文档信息 row under the title.
     pub info: crate::store::InfoRow,
+    /// 阅读标注: 阅读模式 shows the NLP overlay (the 启用阅读标注 switch).
+    pub(super) reader_active: bool,
+    /// The analysis and its step (`reading_nlp.rs`); the key it was built for.
+    pub(super) reader_nlp: Option<Rc<super::reading_nlp::Analysis>>,
+    pub(super) reader_key: Option<(u64, bool, usize, u64)>,
+    /// Bumped on a document or model switch, so a stale analysis is dropped.
+    pub(super) reader_gen: u64,
+    /// The 逐步阅读 step (index into the current unit list), the unit kind
+    /// sentence / paragraph, and whether the step is already placed.
+    pub(super) reader_step: usize,
+    pub(super) reader_units_paragraphs: bool,
+    pub(super) reader_focus: Option<()>,
+    /// After a unit switch: the plain offset to place the first unit at.
+    pub(super) reader_anchor: Option<usize>,
+    pub(super) reader_step_pending: bool,
+    /// Where to put the page for the current unit (block, byte offset).
+    pub(super) reader_show: Option<(BlockId, usize)>,
     /// 阅读位置: where to put the page once this document's rows are laid out
     /// (item index, offset in item). Applied by the next render, then dropped.
     pub restore_top: Option<(usize, f32)>,
@@ -460,6 +477,16 @@ impl Editor {
             markdown: false,
             ro_doc: None,
             info: Default::default(),
+            reader_active: crate::settings::prefs().reader_marks,
+            reader_nlp: None,
+            reader_key: None,
+            reader_gen: 0,
+            reader_step: 0,
+            reader_units_paragraphs: crate::settings::reader_paragraphs(),
+            reader_focus: None,
+            reader_anchor: None,
+            reader_step_pending: false,
+            reader_show: None,
             restore_top: None,
             cd,
             btn,
@@ -525,6 +552,8 @@ impl Editor {
         self.slash = None;
         self.cat_generation = None;
         self.ro_doc = self.read_only.then(|| self.core.doc.clone());
+        self.reader_start();
+        self.reset_reader_nlp();
         self.refresh_find(false, cx);
         cx.notify();
     }
@@ -2223,6 +2252,9 @@ impl Editor {
             .on_action(guard(cx, Self::on_align_right))
             .on_action(guard(cx, Self::on_move_block_up))
             .on_action(guard(cx, Self::on_move_block_down))
+            .on_action(guard(cx, Self::on_reader_next))
+            .on_action(guard(cx, Self::on_reader_prev))
+            .on_action(guard(cx, Self::on_reader_toggle_unit))
     }
 
     // ---- mouse

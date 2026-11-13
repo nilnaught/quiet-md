@@ -1,0 +1,230 @@
+# Trial packages for the reader-phase1 branch: unsigned macOS arm64 zip and
+# Windows x64 installer + portable zip, with LTP/small + English base-int8
+# models bundled. Not for official distribution (no Developer ID / no
+# Authenticode). The models-v1 release is published by hand; this workflow
+# only builds, verifies and uploads artifacts.
+name: Trial packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_release:
+        description: Release tag with quiet-md-models-v1.zip
+        required: false
+        default: models-v1
+  push:
+    branches: [feat/reader-phase1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trial-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: macOS arm64 trial
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SIGNING_IDENTITY: "-"
+      MODEL_RELEASE: ${{ github.event.inputs.model_release || 'models-v1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Python runs natively on every runner, so the archive and the extracted
+      # tree live under $RUNNER_TEMP rather than /tmp (a Git bash path on
+      # Windows that native Windows Python cannot open).
+      - name: Download NLP models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          zipdir="$RUNNER_TEMP/nlp-models-zip"
+          mkdir -p "$zipdir"
+          gh release download "$MODEL_RELEASE" --repo "${{ github.repository }}" \
+            --pattern 'quiet-md-models-v1.zip' --dir "$zipdir"
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          zpath = tmp / "nlp-models-zip" / "quiet-md-models-v1.zip"
+          dest = tmp / "nlp-models"
+          dest.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(zpath) as z:
+              z.extractall(dest)
+          models = dest / "models"
+          # Fail early on a broken archive: the packages carry these files.
+          need = [
+              "NOTICE.md",
+              "ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
+              "en-upos-base/onnx-int8/en_upos_tagger.onnx",
+              "en-upos-base/onnx-int8/en_upos_tagger.onnx.data",
+              "en-upos-base/onnx-int8/en_supar_parser.onnx",
+          ]
+          missing = [n for n in need if not (models / n).is_file()]
+          if missing:
+              raise SystemExit("model release is missing: " + ", ".join(missing))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write("QUIET_MD_NLP_MODELS=" + models.as_posix() + "\n")
+          print("models:", models)
+          PY
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+
+      - name: Package
+        run: scripts/release.sh
+
+      - name: Verify models in the zip
+        run: |
+          zip=$(ls -1 dist-release.*/quiet-md-*-macos-arm64-unsigned.zip | head -1)
+          echo "archive $zip ($(wc -c < "$zip") bytes)"
+          python3 - "$zip" <<'PY'
+          import sys, zipfile
+          names = [n.replace("\\", "/") for n in zipfile.ZipFile(sys.argv[1]).namelist()]
+          need = [
+              "Contents/Resources/models/NOTICE.md",
+              "Contents/Resources/models/ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
+              "Contents/Resources/models/en-upos-base/onnx-int8/en_upos_tagger.onnx",
+              "Contents/Resources/models/en-upos-base/onnx-int8/en_upos_tagger.onnx.data",
+              "Contents/Resources/models/en-upos-base/onnx-int8/en_supar_parser.onnx",
+              "Contents/MacOS/quiet_md",
+          ]
+          # ditto --keepParent keeps the app bundle folder (quiet.md.app/...), so
+          # match by suffix rather than requiring exact entry names.
+          def has(n):
+              return any(x == n or x.endswith("/" + n) for x in names)
+          missing = [n for n in need if not has(n)]
+          if missing:
+              raise SystemExit("missing: " + ", ".join(missing) + "\nsample: " + repr(names[:20]))
+          # Only the int8 English variant ships; fp32 or large models must not.
+          extra = [n for n in names if "en-upos-large" in n or "onnx/encoder_model" in n
+                   or "/models/en-upos-base/onnx/" in n]
+          if extra:
+              raise SystemExit("unexpected model files: " + repr(extra[:10]))
+          print(len(names), "entries; models present")
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-macos-arm64
+          path: |
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-x64:
+    name: Windows x64 trial
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      MODEL_RELEASE: ${{ github.event.inputs.model_release || 'models-v1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Native Windows Python: paths must come from $RUNNER_TEMP, never /tmp.
+      - name: Download NLP models
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipdir = Join-Path $env:RUNNER_TEMP 'nlp-models-zip'
+          New-Item -ItemType Directory -Force $zipdir | Out-Null
+          gh release download $env:MODEL_RELEASE --repo "${{ github.repository }}" --pattern 'quiet-md-models-v1.zip' --dir $zipdir
+          if ($LASTEXITCODE -ne 0) { throw 'Model download failed' }
+          @'
+          import os, zipfile
+          from pathlib import Path
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          zpath = tmp / "nlp-models-zip" / "quiet-md-models-v1.zip"
+          dest = tmp / "nlp-models"
+          dest.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(zpath) as z:
+              z.extractall(dest)
+          models = dest / "models"
+          need = [
+              "NOTICE.md",
+              "ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
+              "en-upos-base/onnx-int8/en_upos_tagger.onnx",
+              "en-upos-base/onnx-int8/en_upos_tagger.onnx.data",
+              "en-upos-base/onnx-int8/en_supar_parser.onnx",
+          ]
+          missing = [n for n in need if not (models / n).is_file()]
+          if missing:
+              raise SystemExit("model release is missing: " + ", ".join(missing))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write("QUIET_MD_NLP_MODELS=" + models.as_posix() + "\n")
+          print("models:", models)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Model extraction failed' }
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools were not found' }
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          & scripts/package-windows.ps1 -Iscc "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+
+      - name: Verify models in the portable zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = 'dist/windows/unsigned'
+          $zip = (Get-ChildItem $out -Filter 'quiet-md-*-windows-x64.zip' | Select-Object -First 1).FullName
+          $setup = (Get-ChildItem $out -Filter 'quiet-md-*-windows-x64-setup.exe' | Select-Object -First 1).FullName
+          if (!$zip -or !$setup) { throw 'Missing portable zip or installer' }
+          Get-ChildItem $out | Format-Table Name, Length
+          $env:ZIP_PATH = $zip
+          @'
+          import os, zipfile
+          path = os.environ["ZIP_PATH"]
+          need = [
+              "models/NOTICE.md",
+              "models/ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
+              "models/en-upos-base/onnx-int8/en_upos_tagger.onnx",
+              "models/en-upos-base/onnx-int8/en_upos_tagger.onnx.data",
+              "models/en-upos-base/onnx-int8/en_supar_parser.onnx",
+              "quiet_md.exe",
+          ]
+          with zipfile.ZipFile(path) as z:
+              names = [n.replace("\\", "/") for n in z.namelist()]
+          # Compress-Archive may keep a leading folder; match by suffix.
+          def has(n):
+              return any(x == n or x.endswith("/" + n) for x in names)
+          missing = [n for n in need if not has(n)]
+          if missing:
+              raise SystemExit("missing: " + ", ".join(missing) + "\nsample: " + repr(names[:20]))
+          extra = [n for n in names if "en-upos-large" in n or "onnx/encoder_model" in n
+                   or "/models/en-upos-base/onnx/" in n]
+          if extra:
+              raise SystemExit("unexpected model files: " + repr(extra[:10]))
+          print(len(names), "entries; models + exe present")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Portable zip check failed' }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-windows-x64
+          path: |
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe.sha256
+            dist/windows/unsigned/quiet-md-*-windows-x64.zip
+            dist/windows/unsigned/quiet-md-*-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

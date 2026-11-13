@@ -21,6 +21,11 @@ impl Editor {
         }
         self.read_only = on;
         self.ro_doc = on.then(|| self.core.doc.clone());
+        // 阅读标注: each visit starts at the document's first unit; the
+        // switch in 设置 says whether the overlay shows at all.
+        self.reader_active = crate::settings::prefs().reader_marks;
+        self.reader_start();
+        self.reset_reader_nlp();
         self.core.break_coalescing();
         self.menu = None;
         self.slash = None;

@@ -27,6 +27,31 @@ pub fn english() -> bool { ENGLISH.load(Ordering::Relaxed) }
 pub fn motion_high() -> bool { MOTION_HIGH.load(Ordering::Relaxed) }
 pub fn tr(zh: &'static str, en: &'static str) -> &'static str { if english() { en } else { zh } }
 
+/// 逐步阅读 unit: true for paragraph steps, false for sentences (the default).
+pub fn reader_paragraphs() -> bool { prefs().reader_unit == "paragraph" }
+
+/// The English model variant the preference names.
+pub fn reader_en_variant() -> reader_nlp::EnVariant {
+    match prefs().reader_model.as_str() { "large-int8" => reader_nlp::EnVariant::LargeInt8, _ => reader_nlp::EnVariant::BaseInt8 }
+}
+
+static NLP: Mutex<Option<std::sync::Arc<reader_nlp::NlpEngine>>> = Mutex::new(None);
+
+/// The process's one NLP engine (models load in the background; until then
+/// `analyze` uses the fallback). The 阅读标注 overlay analyses with this.
+pub fn nlp() -> std::sync::Arc<reader_nlp::NlpEngine> {
+    let mut slot = NLP.lock().unwrap();
+    if let Some(e) = slot.as_ref() {
+        return e.clone();
+    }
+    let e = std::sync::Arc::new(reader_nlp::NlpEngine::start(reader_nlp::NlpOptions { en_variant: reader_en_variant(), ..Default::default() }));
+    *slot = Some(e.clone());
+    e
+}
+
+/// 英文模型 changed: start a new engine (the next analysis uses it).
+fn restart_nlp() { *NLP.lock().unwrap() = Some(std::sync::Arc::new(reader_nlp::NlpEngine::start(reader_nlp::NlpOptions { en_variant: reader_en_variant(), ..Default::default() }))); }
+
 /// Browsers 打开链接 can offer, by the name `open -a` takes. Only the ones
 /// this Mac actually has are listed; anything else is the system default.
 const BROWSERS: [&str; 8] = ["Safari", "Google Chrome", "Microsoft Edge", "Firefox", "Arc", "Brave Browser", "Vivaldi", "Opera"];
@@ -95,6 +120,23 @@ pub struct Preferences {
     pub opaque_window: bool,
     /// 外观 › 界面字号: "small" or "large"; empty is the 13pt standard.
     pub ui_font: String,
+    /// 阅读标注: POS colours, connective / non-finite / core marks and the
+    /// step-by-step reading overlay in 阅读模式 (`reading_nlp.rs`). Only the
+    /// overlay itself is off by default; the classes are on.
+    pub reader_marks: bool,
+    pub reader_nouns: bool,
+    pub reader_verbs: bool,
+    pub reader_adjs: bool,
+    pub reader_advs: bool,
+    pub reader_connectives: bool,
+    pub reader_nonfinite: bool,
+    pub reader_core: bool,
+    /// 逐步阅读 by Space / ← →: the later text fades (`.45`).
+    pub reader_dim: bool,
+    /// 逐步阅读 unit: "sentence" (default) or "paragraph".
+    pub reader_unit: String,
+    /// English model: "base-int8" (default) or "large-int8".
+    pub reader_model: String,
 }
 
 /// Pick the first supported system language; saved preferences still win.
@@ -109,7 +151,7 @@ fn system_english() -> bool {
 }
 
 impl Default for Preferences {
-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), new_default: String::new(), last_new: String::new(), search_engine: String::new(), browser: String::new(), opaque_window: false, ui_font: String::new() } }
+    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), new_default: String::new(), last_new: String::new(), search_engine: String::new(), browser: String::new(), opaque_window: false, ui_font: String::new(), reader_marks: true, reader_nouns: true, reader_verbs: true, reader_adjs: true, reader_advs: true, reader_connectives: true, reader_nonfinite: true, reader_core: true, reader_dim: true, reader_unit: String::new(), reader_model: String::new() } }
 }
 
 impl Preferences {
@@ -534,6 +576,21 @@ impl Workspace {
         if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) {
             refresh_all(self, cx);
         }
+        // 阅读标注: its options change what the editor draws, not the document.
+        if (p.reader_marks != old.reader_marks || p.reader_nouns != old.reader_nouns || p.reader_verbs != old.reader_verbs
+            || p.reader_adjs != old.reader_adjs || p.reader_advs != old.reader_advs || p.reader_connectives != old.reader_connectives
+            || p.reader_nonfinite != old.reader_nonfinite || p.reader_core != old.reader_core || p.reader_dim != old.reader_dim
+            || p.reader_unit != old.reader_unit)
+            && let Some(ed) = &self.editor
+        {
+            ed.update(cx, |e, cx| { e.cache.borrow_mut().clear(); cx.notify(); });
+        }
+        if p.reader_model != old.reader_model && !p.reader_model.is_empty() {
+            restart_nlp();
+            if let Some(ed) = &self.editor {
+                ed.update(cx, |e, cx| { e.reset_reader_nlp(); cx.notify(); });
+            }
+        }
         cx.notify();
     }
 
@@ -680,6 +737,32 @@ impl Workspace {
                 }, cx)
             }).into_any_element()]
         };
+        // 阅读标注: the reader's NLP overlay. The four colour switches only
+        // apply while the overlay is on, which reading mode turns on.
+        let on = |k: fn(&Preferences) -> bool| k(&p);
+        let marks = vec![
+            row(tr("启用阅读标注", "Reading marks"), desc(tr("阅读模式中给词性着色，标出连词、非谓语和核心谓语。", "In reading mode, colour words by class and mark connectives, non-finite verbs and the core predicate.")),
+                switch("pref-reader", p.reader_marks).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_marks = !p.reader_marks, cx)))).into_any_element(),
+            row(tr("名词", "Nouns"), None, switch("pref-reader-noun", on(|p| p.reader_nouns))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_nouns = !p.reader_nouns, cx)))).into_any_element(),
+            row(tr("动词", "Verbs"), None, switch("pref-reader-verb", on(|p| p.reader_verbs))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_verbs = !p.reader_verbs, cx)))).into_any_element(),
+            row(tr("形容词", "Adjectives"), None, switch("pref-reader-adj", on(|p| p.reader_adjs))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_adjs = !p.reader_adjs, cx)))).into_any_element(),
+            row(tr("副词", "Adverbs"), None, switch("pref-reader-adv", on(|p| p.reader_advs))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_advs = !p.reader_advs, cx)))).into_any_element(),
+            row(tr("连词下划线", "Connective underline"), None, switch("pref-reader-conn", on(|p| p.reader_connectives))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_connectives = !p.reader_connectives, cx)))).into_any_element(),
+            row(tr("非谓语点线", "Non-finite dotted line"), None, switch("pref-reader-nf", on(|p| p.reader_nonfinite))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_nonfinite = !p.reader_nonfinite, cx)))).into_any_element(),
+            row(tr("核心谓词圆点", "Core predicate dot"), None, switch("pref-reader-core", on(|p| p.reader_core))
+                .on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_core = !p.reader_core, cx)))).into_any_element(),
+            row(tr("未读淡化", "Dim unread text"), desc(tr("逐步阅读时，当前句/段之后的内容变淡。", "While stepping through, the text after the current sentence or paragraph fades.")),
+                switch("pref-reader-dim", p.reader_dim).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.reader_dim = !p.reader_dim, cx)))).into_any_element(),
+            row(tr("英文模型", "English model"), desc(tr("large-int8 更准、更慢；下次分析时生效。", "large-int8 is more accurate and slower; it applies to the next analysis.")),
+                segmented("reader-model", &["base-int8", "large-int8"], (p.reader_model == "large-int8") as usize,
+                    |w, i, cx| w.set_pref(|p| p.reader_model = ["", "large-int8"][i].into(), cx), cx)).into_any_element(),
+        ];
         div().w_full().flex().flex_col().gap(px(28.))
             .child(group(None, vec![
                 row(tr("界面语言", "Interface language"), None,
@@ -701,6 +784,7 @@ impl Workspace {
                         |w, i, cx| w.set_pref(|p| p.search_engine = ["", "bing", "google", "duckduckgo"][i].into(), cx), cx)
                 }).into_any_element(),
             ].into_iter().chain(links).collect()))
+            .child(group(Some(tr("阅读标注", "Reading marks")), marks))
             .into_any_element()
     }
 

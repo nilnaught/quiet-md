@@ -9,3 +9,16 @@
 
 /dist-release.*
 .wrangler/
+
+# spike crate build (do not commit ONNX Runtime build tree)
+spikes/nlp_models/target/
+**/__pycache__/
+*.pyc
+
+# NLP spike (T-spike-1): model weights never go into git; they live under
+# /workspace/models. Only scripts + label JSON are committed.
+*.onnx
+*.onnx.data
+*.safetensors
+*.bin
+spikes/nlp_models/target/

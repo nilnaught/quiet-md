@@ -180,17 +180,19 @@ BiaffineDependencyParser
 ## 3. 体积 / 内存 / 速度（本机实测）
 
 数据取自 `/workspace/spike-out/metrics.json`（8 vCPU，每个会话 4 intra-op 线程，
-warmup 2 轮后统计，`timeout 600 cargo run --release`；79 句 / 73 次 `annotate()`）：
+warmup 2 轮后统计，`timeout 600 cargo run --release`；79 句 / 73 次 `annotate()`；
+RSS 取 `VmHWM`）。逐次运行有 ±20% 波动（机器同时有其他负载），下表给一次完整运行：
 
 | 模型 | 文件 | 加载 | 每次推理（平均） |
 |---|---|---|---|
-| LTP/small | **49.7 MiB**（图 100 KB + `.onnx.data` 49.6 MiB） | **195 ms** | **4.3 ms**（40 次 = 中文段 × 2 遍） |
-| en tagger | **1357.4 MiB** | **3.21 s** | **84.4 ms**（71 次） |
-| en parser（内嵌 roberta） | **1401.8 MiB** | **6.10 s** | **61.6 ms**（71 次） |
+| LTP/small | **49.7 MiB**（图 100 KB + `.onnx.data` 49.6 MiB） | **134 ms** | **6.5 ms**（40 次 = 中文段 × 2 遍） |
+| en tagger | **1357.4 MiB** | **3.26 s** | **101 ms**（71 次） |
+| en parser（内嵌 roberta） | **1401.8 MiB** | **3.34 s** | **69 ms**（71 次） |
 
-* 三个模型同时常驻 **峰值 RSS 3626 MiB ≈ 3.54 GiB**（`VmHWM`）。
-* 每次 `annotate()` 平均 **140.2 ms**，p50 116.7 ms，p95 308.2 ms，max 726.6 ms。
-* 英文 tagger 的输入构造已改成 esupar 的**整句** `tokenizer(" " + sentence)`
+* 三个模型同时常驻 **峰值 RSS ≈ 3.57 GiB**。
+* 每次 `annotate()` 平均 **158 ms**，p50 128 ms，p95 291 ms，max 1.44 s
+  （max 来自最长的英文对照段）。
+* 英文 tagger 的输入构造是 esupar 的**整句** `tokenizer(" " + sentence)`
   （首词是 `quiet`+`ly`，而不是 `Ġquietly`）——按整句 BPE 才能与 Python 参考一致。
 * 英文两块 fp32 各 1.4 GiB 是主要成本。**下一步**：fp16（`onnxconverter-common`
   或 `onnxruntime.transformers.optimizer`）可把英文降到 ~1.5 GiB 总量，

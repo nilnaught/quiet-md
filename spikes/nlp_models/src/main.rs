@@ -390,7 +390,7 @@ fn render_html(groups: &[GroupJson], en_groups: &[GroupJson]) -> String {
             render_sentence(&mut h, s, &g.text);
         }
     }
-    h.push_str("<h2>英文对照（20 句，与 spaCy en_core_web_trf 对比）</h2>\n");
+    h.push_str("<h2>英文对照（en_compare，与 spaCy en_core_web_trf 对比）</h2>\n");
     for g in en_groups {
         for s in &g.sentences {
             render_sentence(&mut h, s, &g.text);

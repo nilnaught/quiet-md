@@ -86,7 +86,7 @@ jobs:
           echo "archive $zip ($(wc -c < "$zip") bytes)"
           python3 - "$zip" <<'PY'
           import sys, zipfile
-          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          names = [n.replace("\\", "/") for n in zipfile.ZipFile(sys.argv[1]).namelist()]
           need = [
               "Contents/Resources/models/NOTICE.md",
               "Contents/Resources/models/ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
@@ -95,12 +95,16 @@ jobs:
               "Contents/Resources/models/en-upos-base/onnx-int8/en_supar_parser.onnx",
               "Contents/MacOS/quiet_md",
           ]
-          missing = [n for n in need if n not in names]
+          # ditto --keepParent keeps the app bundle folder (quiet.md.app/...), so
+          # match by suffix rather than requiring exact entry names.
+          def has(n):
+              return any(x == n or x.endswith("/" + n) for x in names)
+          missing = [n for n in need if not has(n)]
           if missing:
-              raise SystemExit("missing: " + ", ".join(missing))
+              raise SystemExit("missing: " + ", ".join(missing) + "\nsample: " + repr(names[:20]))
           # Only the int8 English variant ships; fp32 or large models must not.
           extra = [n for n in names if "en-upos-large" in n or "onnx/encoder_model" in n
-                   or "models/en-upos-base/onnx/" in n]
+                   or "/models/en-upos-base/onnx/" in n]
           if extra:
               raise SystemExit("unexpected model files: " + repr(extra[:10]))
           print(len(names), "entries; models present")
@@ -130,9 +134,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          zipdir = Join-Path $env:RUNNER_TEMP 'nlp-models-zip'
+          $ErrorActionPreference = 'Stop'
+          $zipdir = Join-Path $env:RUNNER_TEMP 'nlp-models-zip'
           New-Item -ItemType Directory -Force $zipdir | Out-Null
-          gh release download "$MODEL_RELEASE" --repo "${{ github.repository }}" --pattern 'quiet-md-models-v1.zip' --dir $zipdir
+          gh release download $env:MODEL_RELEASE --repo "${{ github.repository }}" --pattern 'quiet-md-models-v1.zip' --dir $zipdir
           if ($LASTEXITCODE -ne 0) { throw 'Model download failed' }
           @'
           import os, zipfile
@@ -187,7 +192,6 @@ jobs:
           Get-ChildItem $out | Format-Table Name, Length
           $env:ZIP_PATH = $zip
           @'
-          import os, zipfile
           import os, zipfile
           path = os.environ["ZIP_PATH"]
           need = [

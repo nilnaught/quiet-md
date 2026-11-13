@@ -1,0 +1,37 @@
+{
+  "error_cases": {
+    "zh": "秋天的傍晚，明亮的月光轻轻地洒在安静的湖面上。微风慢慢地吹过，金黄的叶子轻轻地落在清澈的水里。孩子们快乐地跑过石桥，大声地笑着。",
+    "en": "The clever young fox quietly crossed the dark river. It slowly climbed the steep bank and carefully watched the sleeping village. Suddenly a loud dog barked, and the frightened animal quickly ran into the dense forest.",
+    "mixed": "她 quietly opened the 旧书，and carefully read every 句子。The tired 孩子们已经慢慢地睡着了，so I gently closed the window.\n\nTomorrow morning we will walk along the 安静的河边，and I will patiently tell them a new story."
+  },
+  "zh_extra": [
+    "因为他生病了，所以今天没有来上课。",
+    "虽然天气很冷，但是他们仍然坚持训练。",
+    "如果明天下雨，我们就改在室内开会。",
+    "她不仅会说英语，而且还会写诗。",
+    "无论遇到什么困难，我们都不要放弃。",
+    "孩子们在花园里唱歌跳舞。"
+  ],
+  "en_compare": [
+    "The clever young fox quietly crossed the dark river.",
+    "It slowly climbed the steep bank and carefully watched the sleeping village.",
+    "Suddenly a loud dog barked, and the frightened animal quickly ran into the dense forest.",
+    "She wants to finish the report before Friday.",
+    "Running every morning keeps him healthy.",
+    "The broken window was repaired yesterday.",
+    "I saw him crossing the street.",
+    "They decided to leave after the meeting ended.",
+    "The book that she bought is interesting.",
+    "He is a man who always tells the truth.",
+    "If it rains, we will stay at home.",
+    "Although she was tired, she finished the work.",
+    "Tom and Mary opened the door and walked inside.",
+    "The sleeping child did not hear the noise.",
+    "Tomorrow morning we will walk along the river.",
+    "I was tired and frightened after the storm.",
+    "She asked me to open the old book carefully.",
+    "Because he was late, the teacher was angry.",
+    "The students who studied hard passed the exam.",
+    "Having finished dinner, they left the restaurant."
+  ]
+}

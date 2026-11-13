@@ -5,27 +5,28 @@
 //! Output: `heads[0..=n_words]` with `heads[0] == 0` and exactly one word
 //! attached to ROOT (for `decode_eisner` this follows from the recursion).
 //!
-//! * [`decode_eisner`] — projective Eisner, a line-by-line port of LTP's
-//!   `ltp_core/algorithms/eisner.py` (itself the yzhangcs/parser "stripe"
-//!   formulation), including its `scores[head][dependent]` axis convention.
-//!   Used for Chinese (LTP) and English (esupar decodes projectively too).
-//! * [`decode_mst`] — best-head graph with cycle cutting. Only used for
-//!   random-matrix sanity checks in tests; it is *not* guaranteed optimal for
-//!   non-projective graphs, which is why it never decodes real output.
+//! * [`decode_mst`] — best-head graph with cycle cutting: every word takes its
+//!   highest-scoring head, cycles are broken by removing their weakest arc and
+//!   re-picking, and a final `repair` pass guarantees a single-rooted tree.
+//! * [`decode_eisner`] — the name the pipelines call. It is **currently an
+//!   alias of [`decode_mst`]** (see the note below).
 //!
-//! Table orientation (same as LTP): `sl[head][dependent]`. `sl[i][j]` with
-//! `i < j` means "i is the head of j"; `sl[j][i]` means "j is the head of i".
+//! Note on Eisner: LTP's own `ltp_core/algorithms/eisner.py` is not the
+//! textbook recurrence (its `stripe()` offsets pair `C[i,r]` with
+//! `C[j-1-r, j]`, i.e. they mix rows), so reproducing its argmax is not a
+//! meaningful target. A from-scratch projective DP was attempted here and
+//! repeatedly failed the exhaustive-optimum oracle on random matrices, so it is
+//! deliberately *not* shipped: a subtly wrong DP is worse than a documented
+//! greedy decoder, especially because both parsers' bare argmax is a valid
+//! tree for practically every real sentence. `EXPORT.md` §5 records the
+//! difference on the fixture sentences. The exhaustive-oracle test below pins
+//! down that the shipped decoder is always a valid tree and never scores above
+//! the optimum.
 
 pub const NEG_INF: f32 = -1e30;
 
-/// Projective decoding.
-///
-/// NOTE: this spike does **not** ship a verified projective Eisner. Both
-/// reference parsers return biaffine scores whose bare argmax is already a
-/// valid tree (checked first in `ltp.rs` / `english.rs`), and this fallback is
-/// aliased to the MST decoder. A from-scratch Eisner was attempted but did not
-/// reproduce `ltp_core.algorithms.eisner`'s argmax on random matrices; rather
-/// than ship a subtly wrong DP it was dropped. See EXPORT.md §5.
+/// SEE the module docs. This is the greedy/MST decoder today; the doc name is
+/// kept because `ltp.rs` / `english.rs` call it through `decode_with_root`.
 pub fn decode_eisner(scores: &[f32], n_words: usize) -> Vec<usize> {
     decode_mst(scores, n_words)
 }

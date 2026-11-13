@@ -350,7 +350,9 @@ fn render_html(groups: &[GroupJson], en_groups: &[GroupJson]) -> String {
 </style></head><body>
 <h1>quiet-md · 离线神经词性 + 依存 spike</h1>
 <p class="sub">中文 <b>LTP/small</b>（分词+词性+依存）· 英文 <b>roberta-large-english-upos</b>（UPOS+SuPar 依存）·
-全部 CPU / ONNX Runtime / Rust <code>ort</code>。分句 ICU，句内按汉/拉丁脚本切分后分别推理，偏移映射回原文。</p>
+全部 CPU / ONNX Runtime / Rust <code>ort</code>。分句 ICU，句内按汉/拉丁脚本切分后分别推理，偏移映射回原文。<br>
+颜色：<b style="color:#2456AE">名词</b> <b style="color:#8E1F2C">动词</b> <b style="color:#00783E">形容词</b>
+<b style="color:#7A4A1E">副词</b>；其余词性不著色。</p>
 <div class="legend">
   <span><span class="sw" style="background:#2456AE"></span>名词</span>
   <span><span class="sw" style="background:#8E1F2C"></span>动词</span>
@@ -362,22 +364,32 @@ fn render_html(groups: &[GroupJson], en_groups: &[GroupJson]) -> String {
 </div>
 "#,
     );
+    let titles = [
+        ("error_cases.old-zh-nr", "中文段落（旧原型把 安静/金黄/叶子 标成人名）"),
+        ("error_cases.old-en-nn", "英文段落（旧原型 clever/tired/frightened 全是 NN）"),
+        ("error_cases.mixed", "中英夹杂（ICU 分句 → 汉/拉丁脚本切分 → 两个模型分别推理）"),
+    ];
     for g in groups {
         if g.name.starts_with("zh_extra") {
             continue;
         }
-        h.push_str(&format!("<h2>{}</h2>\n", esc(&g.name)));
+        let title = titles
+            .iter()
+            .find(|(n, _)| *n == g.name)
+            .map(|(_, t)| (*t).to_string())
+            .unwrap_or_else(|| g.name.clone());
+        h.push_str(&format!("<h2>{}</h2>\n", esc(&title)));
         for s in &g.sentences {
             render_sentence(&mut h, s, &g.text);
         }
     }
-    h.push_str("<h2>中文关联词（zh_extra）</h2>\n");
+    h.push_str("<h2>中文关联词（实线下划线 = 连词）</h2>\n");
     for g in groups.iter().filter(|g| g.name.starts_with("zh_extra")) {
         for s in &g.sentences {
             render_sentence(&mut h, s, &g.text);
         }
     }
-    h.push_str("<h2>英文对照（en_compare，20 句）</h2>\n");
+    h.push_str("<h2>英文对照（20 句，与 spaCy en_core_web_trf 对比）</h2>\n");
     for g in en_groups {
         for s in &g.sentences {
             render_sentence(&mut h, s, &g.text);

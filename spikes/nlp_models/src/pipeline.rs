@@ -151,6 +151,12 @@ impl Pipeline {
     }
 }
 
+/// Map LTP's 27 Penn-Chinese tags onto the four colour classes.
+///
+/// `nh` is a person name ("人名" in LTP's own docs) and `z`/`b` are the
+/// status/other-noun modifiers that behave like adjectives in running text
+/// (轻轻地 → `z`, 金黄 → `z`, 雪白 → `b`). We keep `z` as ADJ so colour words
+/// are coloured; the raw tag is preserved in `upos_or_ltp_tag`.
 pub fn zh_coarse(tag: &str) -> &'static str {
     match tag {
         "n" | "ns" | "nt" | "nh" | "ni" | "nl" | "nz" | "nd" | "j" => "NOUN",

@@ -10,6 +10,11 @@ For every sentence of the fixture's `en_compare` set:
     Rust CLI falls back to its MST repair otherwise);
   * print the first mismatches so a reviewer sees *where* int8 drifts.
 
+NOTE: the tagger inputs here replicate `english.rs` *as of 2026-11-13*
+(whole-sentence `tokenizer(" " + sentence)` BPE + BIO folding through the
+tokenizer's `word_ids`). If `english.rs` changes its tagger input again, update
+`tagger_input`/`word_tags_of` below, or the drift numbers become meaningless.
+
 Usage (one variant per process):
   timeout 600 /workspace/.venv-nlp/bin/python scripts/check_en_variants.py \
       --ref /workspace/models/en-upos-base/onnx \
@@ -95,7 +100,11 @@ def main() -> int:
     so.intra_op_num_threads = 4
     tag_v = ort.InferenceSession(os.path.join(vdir, "en_upos_tagger.onnx"), so, providers=["CPUExecutionProvider"])
     par_v = ort.InferenceSession(os.path.join(vdir, "en_supar_parser.onnx"), so, providers=["CPUExecutionProvider"])
-    have_ref = os.path.realpath(vdir) != os.path.realpath(args.ref)
+    # `realpath` so that an fp32 dir reached through a symlinked *file* still
+    # counts as "this is the reference itself" (skip self-comparison).
+    have_ref = (os.path.realpath(vdir) != os.path.realpath(args.ref)
+                and os.path.realpath(os.path.join(vdir, "en_upos_tagger.onnx"))
+                != os.path.realpath(os.path.join(args.ref, "en_upos_tagger.onnx")))
     if have_ref:
         tag_r = ort.InferenceSession(os.path.join(args.ref, "en_upos_tagger.onnx"), so, providers=["CPUExecutionProvider"])
         par_r = ort.InferenceSession(os.path.join(args.ref, "en_supar_parser.onnx"), so, providers=["CPUExecutionProvider"])
@@ -131,38 +140,43 @@ def main() -> int:
     golden = {"tagger": [], "parser": []}
 
     def tagger_input(sent):
-        # Mirrors english.rs: flat = <s> + BPE(" " + word) per word + </s>, padded
-        # to 40 with <pad>, mask = id != 1. (Tokenising the *sentence* lets
-        # RoBERTa merge "stamps." differently — the CLI never does that.)
+        """Mirror `english.rs::annotate` exactly.
+
+        The CLI (since commit b62872d) feeds the tagger `tokenizer(" " +
+        sentence)` - one BPE pass over the whole `" word word word"` string -
+        and folds BIO labels onto words through the tokenizer's `word_ids`, so
+        a word's label is its *last* piece's label unless that piece is an
+        `I-` continuation. The parser still uses per-word `" "+word` pieces.
+        """
         words = words_of(sent)
-        flat = [0]
-        for w in words:
-            flat.extend(tok.encode(" " + w, add_special_tokens=False).ids)
+        enc = tok.encode(" " + sent.strip(), add_special_tokens=False)
+        flat = [0] + list(enc.ids)
         flat.append(2)
         flat = flat[:512]
         flat += [1] * max(0, 40 - len(flat))
-        return words, np.array([flat], dtype=np.int64), np.array([[int(x != 1) for x in flat]], dtype=np.int64)
+        return words, np.array([flat], dtype=np.int64), np.array([[int(x != 1) for x in flat]], dtype=np.int64), list(enc.word_ids)
+
+    def word_tags_of(logits, word_ids, words):
+        """Same folding as english.rs: last non-I label per word wins."""
+        out = ["" for _ in words]
+        for k, wid in enumerate(word_ids):
+            if wid is None or wid >= len(words):
+                continue
+            lab = id2label[int(logits[0, k + 1].argmax())]
+            if not out[wid] or not lab.startswith("I-"):
+                out[wid] = lab.replace("B-", "", 1) if lab.startswith("B-") else lab
+        return out
 
     for sent in sents:
-        words, ids, mask = tagger_input(sent)
-        lengths = [len(tok.encode(" " + w, add_special_tokens=False).ids) or 1 for w in words]
+        words, ids, mask, tag_word_ids = tagger_input(sent)
         lv = tag_v.run(None, {"input_ids": ids, "attention_mask": mask})[0]
         lv = np.ascontiguousarray(lv, dtype=np.float32)
-        # per-word argmax follows english.rs: the last non-I- subword label wins
-        pv_idx = 1
-        v_words = []
-        for L in lengths:
-            cur = ""
-            for k in range(L):
-                lab = id2label[int(lv[0, pv_idx + k].argmax())]
-                if not lab.startswith("I-"):
-                    cur = lab.replace("B-", "", 1) if lab.startswith("B-") else lab
-            v_words.append(cur)
-            pv_idx += L
+        v_words = word_tags_of(lv, tag_word_ids, words)
         sub_ids, word_ids, order, rows, F = build_parser_inputs(tok, sub_vocab, words)
         n = len(words)
         golden["tagger"].append({"text": sent, "words": words,
-                                 "input_ids": ids[0].tolist(), "mask": mask[0].tolist()})
+                                 "input_ids": ids[0].tolist(), "mask": mask[0].tolist(),
+                                 "tokenizer_word_ids": tag_word_ids})
         golden["parser"].append({"text": sent, "words": words, "word_ids": word_ids,
                                  "subword_ids": sub_ids, "order": order, "rows": rows, "F": F})
         ao = par_v.run(None, {
@@ -193,17 +207,7 @@ def main() -> int:
         ar_ = lr[0].argmax(-1).tolist()
         res["tagger_subword_agree"] += sum(int(a == b) for a, b in zip(av, ar_))
         res["tagger_subword_total"] += len(av)
-        # ref words for comparison
-        pv_idx = 1
-        r_words = []
-        for L in lengths:
-            cur = ""
-            for k in range(L):
-                lab = id2label[int(lr[0, pv_idx + k].argmax())]
-                if not lab.startswith("I-"):
-                    cur = lab.replace("B-", "", 1) if lab.startswith("B-") else lab
-            r_words.append(cur)
-            pv_idx += L
+        r_words = word_tags_of(lr, tag_word_ids, words)
         for w, a, b in zip(words, v_words, r_words):
             res["word_total"] += 1
             if a.split("|")[0] == b.split("|")[0]:

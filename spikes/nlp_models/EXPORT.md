@@ -226,3 +226,143 @@ RSS 取 `VmHWM`）。逐次运行有 ±20% 波动（机器同时有其他负载�
   几十个 case 无法全中；为避免发布一个「看起来对、其实有 subtle bug」的 DP，
   最终**没有**把那个实现作为默认路径（`decode_eisner` 仅别名到 MST），并把
   对应 golden 测试标成 `#[ignore]`。评分不再作为本项目目标。
+
+---
+
+# T-spike-2 — base / int8 变体、量化方法、共享编码器结论
+
+> 本节在 T-spike-1 之后追加。产物仍在 `/workspace/models/`，权重不进 git。
+> 全部数字来自 `/workspace/spike-out/`（见 §8 末的项目脚本清单）。
+
+## 6. 目录与变体
+
+| 变体 | 目录 | 内容 |
+|---|---|---|
+| `large-fp32` | `en-upos-large/onnx/` | T-spike-1 导出，未重导（校验过文件完整） |
+| `large-int8` | `en-upos-large/onnx-int8/` | 两张 int8 图 + symlink 资产 |
+| `base-fp32` | `en-upos-base/onnx/` | 本次导出（roberta-**base**-english-upos） |
+| `base-int8` | `en-upos-base/onnx-int8/` | 同上 |
+
+base 的源权重没有复制：`scripts/stage_en_base.py` 把 HF snapshot 的文件
+（`pytorch_model.bin` 478 MB、`esupar.model` 527 MB）**symlink** 到
+`/workspace/models/en-upos-base/`，导出脚本直接吃这个目录。
+
+```bash
+# base fp32（约 1 分钟，torch 峰值 ~3 GB）
+timeout 60  /workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/stage_en_base.py
+HF_HOME=/workspace/models/hf-cache timeout 900 /workspace/.venv-nlp/bin/python \
+  spikes/nlp_models/scripts/export_english_upos.py \
+  --model /workspace/models/en-upos-base --out /workspace/models/en-upos-base/onnx
+# 只做 torch-vs-ONNX 校验（已有导出时）
+HF_HOME=/workspace/models/hf-cache timeout 600 /workspace/.venv-nlp/bin/python \
+  spikes/nlp_models/scripts/export_english_upos.py \
+  --model /workspace/models/en-upos-base --out /workspace/models/en-upos-base/onnx --verify-only
+```
+
+### base fp32 的 torch-vs-ONNX 校验（`onnx/verify_vs_torch.json`）
+
+4 句 fixture 风格句子，tagger 比较 logits 与 argmax，parser 比较 arc/rel logits 与
+argmax head：
+
+```
+tagger: max|Δlogit| 8.58e-06, subword argmax 一致 100%
+parser: max|Δarc| 1.91e-05, max|Δrel| 1.91e-05, argmax head 一致 100%  → VERIFY OK
+```
+
+（large fp32 在 T-spike-1 已用同样方法校验过。）
+
+## 7. int8 量化（动态、单图单进程）
+
+`scripts/quantize_en_int8.py`：**onnxruntime 动态量化**（无需校准数据，权重
+int8、激活 fp32），每次只处理**一个**图，输出目录只放 int8 图；tokenizer /
+labels / word vocab 由 `scripts/link_en_variant_assets.py` 以 symlink 共享
+（base 的导出早于 `parser_word_vocab.json` 的加入，词汇表相同，直接借用 large 的）。
+
+```bash
+timeout 900 /workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/quantize_en_int8.py \
+  --model-dir /workspace/models/en-upos-base/onnx \
+  --out-dir   /workspace/models/en-upos-base/onnx-int8 --graph en_upos_tagger.onnx
+# 再对 en_supar_parser.onnx 跑一次（另一个进程）
+timeout 60 /workspace/.venv-nlp/bin/python spikes/nlp_models/scripts/link_en_variant_assets.py \
+  --from-dir /workspace/models/en-upos-large/onnx --to-dir /workspace/models/en-upos-base/onnx-int8
+```
+
+### 参数选择（实测，失败的也记下来）
+
+| 方案 | base tagger 词级 UPOS 一致（vs fp32，60 句） | 结论 |
+|---|---|---|
+| **QUInt8 权重 + ORT 默认 op 集**（采用） | **99.84%** | 稳定；parser head 99.85% |
+| QInt8 权重 + ORT 默认 op 集 | 90.2%（个别整句塌缩成 PUNCT/SYM） | 不用 |
+| QInt8 + `nodes_to_quantize`=所有加权节点 | 66.1%（整句塌缩，且**随进程变化**） | 不用，见下 |
+| QInt8 + `per_channel=True` | 23.9% | 不用 |
+| QInt8 + `reduce_range=True` | 37.1% | 不用 |
+| QInt8 + `optimize_model=False` | 47.7% | 不用 |
+| QInt8 + 去掉 Gather | 74.5% | 不用 |
+| QInt8 + 去掉 Transpose | 73.0% | 不用 |
+| QInt8 + `transformer` 预设（preprocess+融合） | 同样不稳定 | 不用 |
+
+第一次的"失败"值得记录：用 `nodes_to_quantize` 选全部加权节点 + QInt8 量化时，
+tagger 在**某些**句子上整段 argmax 变成同一个标签（SYM / PUNCT / ADV），max|Δlogit|
+~50，并且**重新量化一次结果就换一种**。原因：那 48 个"无权重"的 MatMul
+（attention 的 QKᵀ/PV）也被量化，而 Transpose/Gather 的 int8 输出没有逐张量
+zero-point，ORT 的优化器若在该形状上折叠掉某些节点，误差就会放大到塌缩。
+约束到 ORT 默认 op 集后 QInt8 仍偶发（90.2%），换成 **QUInt8 权重**后稳定在
+99.84%（唯一差异是 `next` 的 ADV/ADJ）。
+因此默认值定为 `--nodes default --weight-type QUInt8`，脚本保留其它模式仅供复现。
+
+图级漂移（`scripts/check_en_variants.py`，60 句，与同族 fp32 比较）：
+
+| 对比 | 词级 UPOS | parser head | rel | 合法树 |
+|---|---|---|---|---|
+| base-int8 vs base-fp32 | 99.84%（只有 `next` 从 ADV 变 ADJ） | 99.85% | 99.85% | 96.7% |
+| large-int8 vs large-fp32 | 100.0% | 99.85% | 98.7% | 100% |
+
+（fp32 本身也有约 1–2% 的句子上 bare argmax 不是单根/有环，Rust 侧 MST 修复。）
+
+体积：base 477.5 → 119.7 MiB（tagger）、523.2 → 132.8 MiB（parser）；
+large 1357.4 → 340.2 MiB、1401.8 → 352.9 MiB（QUInt8 为动态量化保存
+scale/zero-point，压缩比略低于 4×；仍全部是 int8 权重）。
+
+清理：量化临时文件（`*.quant.tmp*`）由脚本删除；没有保留任何 fp32 副本或
+pytorch staging；`df -h /` 记录见 §8。量化期间一次只加载一个图。
+
+## 8. 共享编码器探测 → 结论：**可以共享**（但本次未导出共享图）
+
+`scripts/probe_en_shared_encoder.py` 比较 tagger 的 `roberta.*` 与 parser
+`bert_embed.bert.*` 的每一个参数：
+
+| 模型 | 参数数 | 最大 \|Δ\| | 结论 |
+|---|---|---|---|
+| large | 389 | **0.0** | 逐比特相同（embeddings、每层 attention/FFN/LN、最后一层） |
+| base | 197 | **0.0** | 逐比特相同 |
+
+细节：`/workspace/spike-out/en_encoder_share_{large,base}.json`。也就是说
+`esupar.model` 里的编码器**不是另一份微调权重**，而是与 tagger 完全同一份
+RoBERTa（large 24 层 1024d / base 12 层 768d）。parser 在此基础上额外使用
+`ScalarMix(最后 4 层)` + 1024→100 投影 + 3 层 BiLSTM + biaffine。
+
+为什么本次**仍没有**导出"共享编码器"的联合图：
+
+* parser 取的是**最后 4 层 hidden states**（`output_hidden_states=True`），
+  tagger 也需要最后一层；联合图必须同时输出 `hidden_states[-4..]` 与 logits，
+  而 Rust 侧现有输入构造（tagger = 整句 `" "+sentence` 的一次 BPE、40-token 定长
+  pad；parser = 按词的 word/subword 网格）完全不同，合并意味着重写
+  `english.rs` 的整套接口与 golden 测试；
+* 收益只是磁盘：如果把同一份 RoBERTa 权重在两张图里共享（ONNX external data
+  指向同一 `.data`），fp32 large 可从 2.76 GiB 降到约 1.4 GiB，int8 可从
+  2.08 GiB 降到约 1.0 GiB；但运行时仍是两次前向，延迟与 RSS 基本不变；
+* 结论：**共享在结构上可行且无损（权重相同）**，但需要修改 `english.rs` 的输入/
+  输出契约，超出本任务"不重写模型代码"的范围；记录为后续优化项。
+  本次"廉价共享"只做了 **tokenizer/labels/vocab 的 symlink 共享**（见 §7）。
+
+## 9. 磁盘（量化前后，`df -h /`）
+
+```
+base fp32 导出后 /dev/vdb 128G 47G 81G 37%
+四张 int8 图后   /dev/vdb 128G 51G 77G 40%
+```
+
+`du -sh /workspace/models/*`：`en-upos-base 1.4G`（fp32 base 1.0 GiB + int8 约
+245 MiB；symlink 指向的源权重不计入）、`en-upos-large 4.8G`（fp32 2.76 GiB +
+int8 约 2.03 GiB）、`ltp-small 51M`、`hf-cache 6.8G`（base + large 的原始
+snapshot，未复制、未留下 staging 目录）。

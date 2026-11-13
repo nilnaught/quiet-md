@@ -79,7 +79,53 @@ pub struct EnToken {
     pub deprel: String,
 }
 
+/// Which exported English model the CLI loads. One variant at a time: the two
+/// fp32 graphs are 1.4 GiB each and the int8 ones ~0.4-1.0 GiB each, and the
+/// CLI must never hold two variants at once (16 GB box, see README).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    LargeFp32,
+    LargeInt8,
+    BaseFp32,
+    BaseInt8,
+}
+
+impl Variant {
+    pub const ALL: [Variant; 4] = [
+        Variant::LargeFp32,
+        Variant::LargeInt8,
+        Variant::BaseFp32,
+        Variant::BaseInt8,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Variant::LargeFp32 => "large-fp32",
+            Variant::LargeInt8 => "large-int8",
+            Variant::BaseFp32 => "base-fp32",
+            Variant::BaseInt8 => "base-int8",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Variant> {
+        Variant::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
+    /// Directory relative to `--models-dir`.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Variant::LargeFp32 => "en-upos-large/onnx",
+            Variant::LargeInt8 => "en-upos-large/onnx-int8",
+            Variant::BaseFp32 => "en-upos-base/onnx",
+            Variant::BaseInt8 => "en-upos-base/onnx-int8",
+        }
+    }
+}
+
 pub struct English {
+    pub variant: Variant,
+    /// Resolved model directory (absolute or as given under `--models-dir`).
+    pub dir: std::path::PathBuf,
     tagger: Session,
     parser: Session,
     tokenizer: tokenizers::Tokenizer,
@@ -95,7 +141,31 @@ pub struct English {
 
 impl English {
     pub fn load(models_dir: &Path, threads: usize) -> Result<Self> {
-        let dir = models_dir.join("en-upos-large").join("onnx");
+        Self::load_variant(models_dir, Variant::LargeFp32, threads)
+    }
+
+    pub fn load_variant(models_dir: &Path, variant: Variant, threads: usize) -> Result<Self> {
+        let dir = models_dir.join(variant.dir());
+        // asset lookup order: the variant dir first, then the fp32 sibling
+        let mut asset_dirs = vec![dir.clone()];
+        if matches!(variant, Variant::BaseFp32 | Variant::BaseInt8) {
+            // `parser_word_vocab.json` was only dumped for the large export (both
+            // exports were done before the field was added to the script); both
+            // model cards share the same 15721-entry word vocab (verified:
+            // identical parser word_embed shape, 0 UPOS-head mismatch attributable
+            // to the vocab), so borrow the large dump.
+            let large = models_dir.join("en-upos-large/onnx");
+            if !asset_dirs.contains(&large) {
+                asset_dirs.push(large);
+            }
+        }
+        let find = |name: &str| -> Result<std::path::PathBuf> {
+            asset_dirs
+                .iter()
+                .map(|d| d.join(name))
+                .find(|p| p.exists())
+                .with_context(|| format!("asset {name} not found under {dir:?}"))
+        };
         let tagger_path = dir.join("en_upos_tagger.onnx");
         let parser_path = dir.join("en_supar_parser.onnx");
 
@@ -103,7 +173,11 @@ impl English {
         let tagger = ortutil::session(&tagger_path, threads)?;
         let mut tagger_stat = ModelStat::default();
         tagger_stat.load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        tagger_stat.files = ortutil::file_sizes(&[&tagger_path, &dir.join("tagger_labels.json")]);
+        let tagger_labels_path = find("tagger_labels.json")?;
+        let parser_labels_path = find("parser_labels.json")?;
+        let word_vocab_path = find("parser_word_vocab.json")?;
+        let tokenizer_path = find("tokenizer")?.join("tokenizer.json");
+        tagger_stat.files = ortutil::file_sizes(&[&tagger_path, &tagger_labels_path]);
         let mem_after_tagger = ortutil::rss_mib();
 
         let t1 = std::time::Instant::now();
@@ -112,27 +186,26 @@ impl English {
         parser_stat.load_ms = t1.elapsed().as_secs_f64() * 1000.0;
         parser_stat.files = ortutil::file_sizes(&[
             &parser_path,
-            &dir.join("parser_labels.json"),
-            &dir.join("parser_word_vocab.json"),
+            &parser_labels_path,
+            &word_vocab_path,
         ]);
         eprintln!(
-            "  en: rss after tagger {:?} MiB, after parser {:?} MiB",
+            "  en[{}]: rss after tagger {:?} MiB, after parser {:?} MiB",
+            variant.as_str(),
             mem_after_tagger,
             ortutil::rss_mib()
         );
 
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(dir.join("tokenizer").join("tokenizer.json"))
-                .map_err(|e| anyhow!("en tokenizer: {e}"))?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| anyhow!("en tokenizer: {e}"))?;
         let tl: TaggerLabels = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("tagger_labels.json")).context("tagger_labels.json")?,
+            &std::fs::read_to_string(&tagger_labels_path).context("tagger_labels.json")?,
         )?;
         let pl: ParserLabels = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("parser_labels.json")).context("parser_labels.json")?,
+            &std::fs::read_to_string(&parser_labels_path).context("parser_labels.json")?,
         )?;
         let wv: WordVocabFile = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("parser_word_vocab.json"))
-                .context("parser_word_vocab.json")?,
+            &std::fs::read_to_string(&word_vocab_path).context("parser_word_vocab.json")?,
         )?;
         if wv.itos.len() > pl.word_vocab_size {
             return Err(anyhow!(
@@ -156,6 +229,8 @@ impl English {
             id2label[i] = v;
         }
         Ok(Self {
+            variant,
+            dir,
             tagger,
             parser,
             tokenizer,

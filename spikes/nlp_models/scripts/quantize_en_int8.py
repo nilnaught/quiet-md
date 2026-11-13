@@ -1,6 +1,12 @@
 #!/usr/bin/env python
-"""Dynamic int8 quantisation (onnxruntime `QuantType.QInt8`) for one exported
-English ONNX graph at a time.
+"""Dynamic int8 quantisation (onnxruntime `QuantType`) for one exported English
+ONNX graph at a time.
+
+Weight type: `QUInt8` by default. `QInt8` (signed) was tried first and drifts
+badly on these graphs - on the base tagger the argmax collapsed to one class
+for whole sentences and UPOS agreement vs fp32 fell to ~0.66; `QUInt8` keeps
+UPOS agreement at 1.00 (max logit Δ 5.0) and parser head agreement at 0.9985.
+Both are still int8 storage (see EXPORT.md table).
 
 Why dynamic: the graphs are dominated by *dense* weights (RoBERTa matmuls + the
 SuPar BiLSTM). Dynamic quantisation needs no calibration data, keeps activations
@@ -64,6 +70,9 @@ def main() -> int:
     ap.add_argument("--graph", required=True, help="one file name, e.g. en_upos_tagger.onnx")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--keep-temp", action="store_true")
+    ap.add_argument("--weight-type", default="QUInt8", choices=["QUInt8", "QInt8"],
+                    help="QUInt8 (default, symmetric-uint8 weights) is numerically far closer to "
+                         "fp32 than QInt8 for these graphs; compared in EXPORT.md")
     ap.add_argument("--nodes", default="default", choices=["default", "weighted", "raw"],
                     help="default = ORT op-type set (MatMul/Attention/LSTM/Gather/Transpose/"
                          "LayerNormalization); weighted = only MatMul nodes with a constant "
@@ -88,20 +97,20 @@ def main() -> int:
     )
 
     # Which nodes get quantised (see EXPORT.md for the measurements):
-    #  * "default"  - ORT's dynamic-quantisation op-type set. This is what the
-    #    shipped graphs use. Our first attempt quantised *every* MatMul too
-    #    (`nodes_to_quantize` = all weighted nodes), which also hit the 48
-    #    activation-only MatMuls (attention QKᵀ/PV). Without per-channel scales
-    #    the QKᵀ product is then dominated by quantisation noise and the output
-    #    is garbage on a sentence shape the optimiser did not fold for - the
-    #    argmax collapsed to a single label (SYM / PUNCT / ADV) depending on the
-    #    sentence. Restricted to ORT's op set (MatMul weights still included,
-    #    but with ORT's own pre-processing) the outputs are sane and stable.
+    #  * "default"  - ORT's dynamic-quantisation op-type set
+    #    (MatMul/Attention/LSTM/Gather/Transpose/LayerNormalization). This is
+    #    what the shipped graphs use.
     #  * "weighted" - only MatMul nodes whose 2nd input is an initializer
     #    (skips the activation-only attention matmuls) + Gather/LSTM/Attention/
-    #    LayerNormalization. Kept as an alternative.
+    #    LayerNormalization. Diagnostic only.
     #  * "raw"      - same op-type set but with `optimize_model=False` (no
-    #    constant folding / fusions before quantising); recorded for comparison.
+    #    constant folding / fusions before quantising). Diagnostic only.
+    #
+    # History: the very first run used `nodes_to_quantize` = *all* weighted
+    # nodes with QInt8 weights and produced models whose tagger argmax collapsed
+    # to one label for whole sentences (SYM/PUNCT/ADV) - unstable across runs.
+    # The fix was two-fold: ORT's own op set/pre-processing (`default`) and
+    # QUInt8 weights (see --weight-type). Both are now the defaults.
     if args.nodes == "weighted":
         m = onnx.load(src, load_external_data=False)
         inits = {i.name for i in m.graph.initializer}
@@ -118,7 +127,7 @@ def main() -> int:
         quantize_dynamic(
             model_input=src,
             model_output=tmp,
-            weight_type=QuantType.QInt8,
+            weight_type=getattr(QuantType, args.weight_type),
             op_types_to_quantize=OP_TYPES if args.nodes != "weighted" else None,
             per_channel=False,
             reduce_range=False,

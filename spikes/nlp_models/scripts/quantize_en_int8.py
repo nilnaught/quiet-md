@@ -49,6 +49,9 @@ OP_TYPES = [
     "LayerNormalization",
 ]
 
+# Ops that carry a weight matrix worth quantising (default mode).
+WEIGHTED_OPS = ["MatMul", "Gather", "LSTM", "Attention", "LayerNormalization"]
+
 # Anything bigger goes into the external `.data` file so the .onnx stub stays
 # small and diffable (the repo never tracks either file).
 EXT_DATA_THRESHOLD = 1024
@@ -61,6 +64,11 @@ def main() -> int:
     ap.add_argument("--graph", required=True, help="one file name, e.g. en_upos_tagger.onnx")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--keep-temp", action="store_true")
+    ap.add_argument("--nodes", default="default", choices=["default", "weighted", "raw"],
+                    help="default = ORT op-type set (MatMul/Attention/LSTM/Gather/Transpose/"
+                         "LayerNormalization); weighted = only MatMul nodes with a constant "
+                         "weight input (+ Gather/LSTM/Attention/LayerNormalization); raw = "
+                         "op-type set without ORT's graph optimisation")
     args = ap.parse_args()
 
     src = os.path.join(args.model_dir, args.graph)
@@ -79,6 +87,31 @@ def main() -> int:
         quantize_dynamic,
     )
 
+    # Which nodes get quantised (see EXPORT.md for the measurements):
+    #  * "default"  - ORT's dynamic-quantisation op-type set. This is what the
+    #    shipped graphs use. Our first attempt quantised *every* MatMul too
+    #    (`nodes_to_quantize` = all weighted nodes), which also hit the 48
+    #    activation-only MatMuls (attention QKᵀ/PV). Without per-channel scales
+    #    the QKᵀ product is then dominated by quantisation noise and the output
+    #    is garbage on a sentence shape the optimiser did not fold for - the
+    #    argmax collapsed to a single label (SYM / PUNCT / ADV) depending on the
+    #    sentence. Restricted to ORT's op set (MatMul weights still included,
+    #    but with ORT's own pre-processing) the outputs are sane and stable.
+    #  * "weighted" - only MatMul nodes whose 2nd input is an initializer
+    #    (skips the activation-only attention matmuls) + Gather/LSTM/Attention/
+    #    LayerNormalization. Kept as an alternative.
+    #  * "raw"      - same op-type set but with `optimize_model=False` (no
+    #    constant folding / fusions before quantising); recorded for comparison.
+    if args.nodes == "weighted":
+        m = onnx.load(src, load_external_data=False)
+        inits = {i.name for i in m.graph.initializer}
+        nodes = [n.name for n in m.graph.node
+                 if (n.op_type == "MatMul" and len(n.input) > 1 and n.input[1] in inits)
+                 or n.op_type in ("Gather", "LSTM", "Attention", "LayerNormalization")]
+        extra = {"nodes_to_quantize": nodes}
+        print(f"{args.graph}: weighted-node mode, {len(nodes)} nodes")
+    else:
+        extra = {}
     tmp = os.path.join(args.out_dir, args.graph + ".quant.tmp")
     t0 = time.time()
     try:
@@ -86,9 +119,11 @@ def main() -> int:
             model_input=src,
             model_output=tmp,
             weight_type=QuantType.QInt8,
-            op_types_to_quantize=OP_TYPES,
+            op_types_to_quantize=OP_TYPES if args.nodes != "weighted" else None,
             per_channel=False,
             reduce_range=False,
+            extra_options=extra if args.nodes == "weighted" else
+            ({"optimize_model": False} if args.nodes == "raw" else None),
         )
     except Exception as e:  # noqa: BLE001 - we want the reason in the log
         print(f"QUANTIZE FAILED for {args.graph}: {type(e).__name__}: {e}", file=sys.stderr)

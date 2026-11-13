@@ -232,10 +232,26 @@ impl English {
         }
 
         // ---- tagger -------------------------------------------------------
+        // esupar feeds the tagger `AutoTokenizer(" " + sentence)` — one pass
+        // over the WHOLE `" word word word"` string, not the concatenation of
+        // per-word pieces. The two agree except at the first word, where the
+        // whole-sentence BPE has no leading space (`quiet` + `ly` instead of
+        // `Ġquietly`), which changes the tags. Reproduce the reference: BPE the
+        // joined string and use *that* for the tagger.
+        let (tagger_ids, tagger_word_ids) = {
+            let enc = self
+                .tokenizer
+                .encode(format!(" {}", text.trim()), false)
+                .map_err(|e| anyhow!("roberta encode: {e}"))?;
+            let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+            (ids, enc.get_word_ids().to_vec())
+        };
         let mut flat: Vec<i64> = vec![0]; // <s>
-        for p in &pieces {
-            flat.extend_from_slice(p);
-        }
+        flat.extend_from_slice(&tagger_ids);
+        // esupar tokenizes `" " + s` per word, so the very first piece is a
+        // space-prefixed piece (`Ġquietly`), never a bare `quiet`. Keeping that
+        // shape is what makes esupar's own tagger behave; do not "fix" it by
+        // stripping the leading space (Python reference does the same).
         flat.push(2); // </s>
         flat.truncate(self.max_len);
         while flat.len() < PADDING {
@@ -270,23 +286,34 @@ impl English {
         // pieces -> words: BIO labels stay inside the word they start in; a
         // packed multiword label (`ADP+DET`, `B-PROPN+PROPN+…`) belongs to the
         // word where it starts.
-        let mut word_tags: Vec<String> = Vec::with_capacity(words.len());
-        {
-            let mut sub = 1usize; // skip <s>
-            for p in &pieces {
-                let mut cur = String::new();
-                for k in 0..p.len() {
-                    let lab = self
-                        .id2label
-                        .get(sub_labels[sub + k])
-                        .cloned()
-                        .unwrap_or_default();
-                    if !lab.starts_with("I-") {
-                        cur = strip_bio(&lab).to_string();
-                    }
-                }
-                word_tags.push(cur);
-                sub += p.len();
+        // BIO labels are folded per whitespace word: a label starting with
+        // `B-` (or a bare UPOS) replaces the word's tag, `I-` continuations are
+        // folded into the previous label (`B-ADV` + `I-ADV` -> `ADV`).
+        let mut word_tags: Vec<String> = vec![String::new(); words.len()];
+        for (k, wid) in tagger_word_ids.iter().enumerate() {
+            let Some(w) = wid else { continue };
+            let w = *w as usize;
+            if w >= words.len() {
+                continue;
+            }
+            let lab = self
+                .id2label
+                .get(sub_labels[k + 1])
+                .cloned()
+                .unwrap_or_default();
+            let cur = &mut word_tags[w];
+            if cur.is_empty() || !lab.starts_with("I-") {
+                *cur = strip_bio(&lab).to_string();
+            }
+        }
+        for (i, t) in word_tags.iter_mut().enumerate() {
+            if t.is_empty() {
+                // word made of no piece (should not happen): fall back
+                *t = self
+                    .id2label
+                    .get(*sub_labels.get(1 + i).unwrap_or(&0))
+                    .cloned()
+                    .unwrap_or_default();
             }
         }
 

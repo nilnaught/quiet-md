@@ -49,7 +49,7 @@ timeout 600 cargo run --release --manifest-path spikes/nlp_models/Cargo.toml -- 
   --models-dir /workspace/models \
   --out-dir /workspace/spike-out \
   --input spikes/nlp_models/fixtures/sentences.json \
-  --compare-dir /tmp/spike-cmp   # 可选：导出 20 句英文，供 compare_spacy.py 用
+  --compare-dir /tmp/spike-cmp   # 可选：导出 en_compare 各句，供 compare_spacy.py 用
 
 # 3b) 单元测试（始终加 timeout）
 timeout 120 cargo test --release --manifest-path spikes/nlp_models/Cargo.toml
@@ -153,6 +153,19 @@ HF_HOME=/workspace/models/hf-cache /workspace/.venv-nlp/bin/python \
 * Intel Mac 是唯一需要「自己找库」的目标；官方 1.31 release 在
   `microsoft/onnxruntime` GitHub Releases 提供 `onnxruntime-osx-x86_64-*`
   的 dylib，可直接打包。
+
+## 5b. 与 spaCy `en_core_web_trf` 的一致性（`compare-en.json`）
+
+在 fixtures 的 `en_compare` 英文对照句上（当前 60 句），逐词对齐后：
+
+| 指标 | 结果 |
+|---|---|
+| 粗类词性一致率（名词/动词/形容词/副词） | **98.1%**（309/315） |
+| 依存 root 一致率（同一 token 作根） | **78.3%**（47/60） |
+| 谓语中心一致率（`is_core_verb` vs spaCy ROOT/acomp） | **96.7%**（58/60） |
+
+不一致主要来自 UD 与 spaCy 的清规不同（系词句 root 取舍、`obl`/`advmod` 介词），
+以及 spaCy 对 `don't` 之类的切分。逐句明细见 `compare-en.json` 的 `per_sentence`。
 
 ## 6. 许可
 

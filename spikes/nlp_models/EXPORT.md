@@ -180,18 +180,18 @@ BiaffineDependencyParser
 ## 3. 体积 / 内存 / 速度（本机实测）
 
 数据取自 `/workspace/spike-out/metrics.json`（8 vCPU，每个会话 4 intra-op 线程，
-warmup 2 轮后统计，`timeout 600 cargo run --release`）：
+warmup 2 轮后统计，`timeout 600 cargo run --release`；79 句 / 73 次 `annotate()`）：
 
 | 模型 | 文件 | 加载 | 每次推理（平均） |
 |---|---|---|---|
-| LTP/small | 49.7 MiB（`onnx` 100 KB + `.onnx.data` 49.5 MiB） | **97 ms** | **3.6 ms**（40 次 = 20 个中文段 × 2 遍） |
-| en tagger | 1.36 GiB | **3.24 s** | **69 ms**（31 次） |
-| en parser + 内嵌 roberta | 1.37 GiB | **3.08 s** | **48 ms**（31 次） |
+| LTP/small | **49.7 MiB**（图 100 KB + `.onnx.data` 49.6 MiB） | **195 ms** | **4.3 ms**（40 次 = 中文段 × 2 遍） |
+| en tagger | **1357.4 MiB** | **3.21 s** | **84.4 ms**（71 次） |
+| en parser（内嵌 roberta） | **1401.8 MiB** | **6.10 s** | **61.6 ms**（71 次） |
 
-* 三个模型同时常驻 **峰值 RSS 3629.7 MiB ≈ 3.55 GiB**（`VmHWM`；tagger 加载后
-  2.0 GiB，parser 加载后 3.6 GiB）。
-* 每次 `annotate()`（一个 group 文本，可能多句）平均 **106.8 ms**，p50 113.5 ms，
-  p95 371.8 ms，max 727.8 ms（33 个样本，含 20 句英文对照逐句调用）。
+* 三个模型同时常驻 **峰值 RSS 3626 MiB ≈ 3.54 GiB**（`VmHWM`）。
+* 每次 `annotate()` 平均 **140.2 ms**，p50 116.7 ms，p95 308.2 ms，max 726.6 ms。
+* 英文 tagger 的输入构造已改成 esupar 的**整句** `tokenizer(" " + sentence)`
+  （首词是 `quiet`+`ly`，而不是 `Ġquietly`）——按整句 BPE 才能与 Python 参考一致。
 * 英文两块 fp32 各 1.4 GiB 是主要成本。**下一步**：fp16（`onnxconverter-common`
   或 `onnxruntime.transformers.optimizer`）可把英文降到 ~1.5 GiB 总量，
   或把 tagger+parser 的两个 roberta 共享（需要重训/蒸馏，不适合本 spike）。
@@ -202,6 +202,8 @@ warmup 2 轮后统计，`timeout 600 cargo run --release`）：
 
 * **LTP/base**：未导出（内存在 16 GB 机器上与英文两块同时驻留风险大）。
 * **英文 fp16/int8 量化**：未做（会改变数值，需重新校验 head 一致性）。
+  独立探针脚本 `scripts/check_en_variants.py` 与 `scripts/check_en_base_int8.json`
+  记录了 int8/base 变体的偏差，仅供参考，未接入 CLI。
 * **esupar 的多词 token 切分表**（`upos_multiword`）：Rust 侧用「按 `+` 个数
   在标点/空格处切」的近似；fixtures 中没有触发。
 

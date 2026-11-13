@@ -67,6 +67,8 @@ def main() -> int:
     ap.add_argument("--out", default="")
     ap.add_argument("--max-report", type=int, default=8)
     ap.add_argument("--vocab-from", default="", help="dir holding parser_word_vocab.json if absent")
+    ap.add_argument("--tokens-dir", default="", help="CLI --compare-dir output to cross-check tokenisation")
+    ap.add_argument("--dump-golden", default="", help="write golden tagger/parser inputs as JSON")
     args = ap.parse_args()
     name, vdir = args.variant.split("=", 1)
 
@@ -125,6 +127,9 @@ def main() -> int:
     }
     import numpy as np
 
+    # ---- golden inputs for the Rust CLI (reused by --tokens-dir mode) ------
+    golden = {"tagger": [], "parser": []}
+
     def tagger_input(sent):
         # Mirrors english.rs: flat = <s> + BPE(" " + word) per word + </s>, padded
         # to 40 with <pad>, mask = id != 1. (Tokenising the *sentence* lets
@@ -156,6 +161,10 @@ def main() -> int:
             pv_idx += L
         sub_ids, word_ids, order, rows, F = build_parser_inputs(tok, sub_vocab, words)
         n = len(words)
+        golden["tagger"].append({"text": sent, "words": words,
+                                 "input_ids": ids[0].tolist(), "mask": mask[0].tolist()})
+        golden["parser"].append({"text": sent, "words": words, "word_ids": word_ids,
+                                 "subword_ids": sub_ids, "order": order, "rows": rows, "F": F})
         ao = par_v.run(None, {
             "subword_ids": np.array([sub_ids], dtype=np.int64).reshape(1, rows, F),
             "word_ids": np.array([word_ids], dtype=np.int64),
@@ -218,6 +227,30 @@ def main() -> int:
 
     def rate(a, b):
         return round(a / b, 4) if b else None
+
+    if args.dump_golden:
+        json.dump(golden, open(args.dump_golden, "w"))
+        print(f"golden inputs -> {args.dump_golden}", file=sys.stderr)
+    if args.tokens_dir:
+        import glob as _glob
+        ours = {}
+        for f in _glob.glob(os.path.join(args.tokens_dir, "*.json")):
+            d = json.load(open(f))
+            ours[d["text"]] = [t for s in d["sentences"] for t in s["tokens"]]
+        idx = {s["text"]: i for i, s in enumerate(golden["parser"])}
+        # tagger: the 2nd output tensor logits -> labels; parser: len(heads) must
+        # be words+1 (i.e. the ORT graph ran, not a stub)
+        tok_ok = 0
+        tok_bad = []
+        for g in golden["tagger"]:
+            toks = ours.get(g["text"], [])
+            got = [t["text"] for t in toks]
+            if got == g["words"] or [w for w in got if w not in ("",)] == g["words"]:
+                tok_ok += 1
+            else:
+                tok_bad.append({"text": g["text"], "expected": g["words"], "got": got})
+        res["cli_tokenization_matches"] = {"ok": tok_ok, "total": len(golden["tagger"]),
+                                            "bad": tok_bad[:3]}
 
     out = {
         **res,

@@ -671,7 +671,8 @@ fn frame(window: &mut Window, cx: &mut App) -> anyhow::Result<(usize, usize, Vec
     grab(window)
 }
 
-#[cfg(target_os = "macos")]
+/// The window's frame offscreen (`frame`) to a PNG, on every platform;
+/// offscreen frames are the only capture Linux has.
 fn capture(window: &mut Window, cx: &mut App, path: &str) -> anyhow::Result<()> {
     let (w, h, mut px) = frame(window, cx)?;
     for p in px.as_chunks_mut::<4>().0 {
@@ -792,11 +793,6 @@ fn start_recording(handle: AnyWindowHandle, path: &str, cx: &mut AsyncApp) -> st
     })
     .detach();
     stop
-}
-
-#[cfg(not(target_os = "macos"))]
-fn capture(_: &mut Window, _: &mut App, _: &str) -> anyhow::Result<()> {
-    anyhow::bail!("capture is only implemented on macOS")
 }
 
 #[cfg(not(target_os = "macos"))]

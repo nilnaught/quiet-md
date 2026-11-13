@@ -21,6 +21,7 @@ default-members = [".", "crates/core"]
 
 [dependencies]
 fdl_core = { path = "crates/core" }
+reader_nlp = { path = "crates/reader_nlp" }
 anyhow = "1.0.104"
 async-lock = "3.4"
 dirs = "7.0.0"

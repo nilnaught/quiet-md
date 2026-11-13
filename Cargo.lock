@@ -4808,6 +4808,7 @@ dependencies = [
  "objc",
  "quick-xml 0.37.5",
  "raw-window-handle",
+ "reader_nlp",
  "regex",
  "rustc-hash 2.1.3",
  "serde",

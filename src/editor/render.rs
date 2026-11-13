@@ -239,8 +239,11 @@ impl R<'_> {
         let bm = core.in_block_mode() || self.ghost;
         let sel = core.sel;
         spec.link_underline = !bm && self.focused && sel.head.block == id;
+        // 未读淡化 washes the text with the paper its rows sit on.
+        spec.paper.get_or_insert_with(crate::editor_theme::Theme::bg_body);
         let selection = if bm || sel.is_collapsed() { None } else { core.range_in(id, &self.units) };
         let caret_here = !bm && core.cell_sel.is_none() && sel.head.block == id && sel.is_collapsed();
+        let overlay = self.reader_overlay(id, text);
         RichTextElement {
             id,
             text: text.clone(),
@@ -261,7 +264,20 @@ impl R<'_> {
             button_edit: if self.ghost { None } else { self.ed.button_preview(id) },
             scroll: None,
             fit_content: false,
+            overlay,
         }
+    }
+
+    /// 阅读标注 of one block, or `None` outside 阅读模式 and for rows that are
+    /// not the document's own (the title, ghosts, code).
+    fn reader_overlay(&self, id: BlockId, text: &RichText) -> Option<Rc<super::reading_nlp::Overlay>> {
+        let ed = self.ed;
+        if !ed.reader_marks_on() || self.ghost || id == core::TITLE || ed.core.is_code(id) {
+            return None;
+        }
+        let opts = super::reading_nlp::MarkOpts::from_prefs();
+        let a = ed.reader_nlp.as_ref()?;
+        a.overlay(id, text, opts).map(Rc::new)
     }
 
     /// The code column. Unwrapped code scrolls sideways in it, with the wide
@@ -780,6 +796,7 @@ impl R<'_> {
             doc_font: true,
             font: None,
             italic: false,
+            paper: None,
         };
         // Line numbers follow the wrapped rows of the last layout.
         let rows_per_line: Vec<usize> = {
@@ -1578,6 +1595,7 @@ impl Editor {
                         cx.spawn(async |this, cx| this.update(cx, |_, cx| cx.notify())).detach();
                     }
                     ed.apply_reveal(window);
+                    ed.after_frame(window, cx);
                 });
             },
         )
@@ -2054,6 +2072,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
             doc_font: true,
             font: None,
             italic: false,
+            paper: None,
         };
         // Line numbers follow the wrapped rows of the last layout.
         let rows_per_line: Vec<usize> = {

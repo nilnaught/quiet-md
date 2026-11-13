@@ -121,6 +121,7 @@ def main() -> int:
         "max_arc_absdiff": 0.0, "max_logit_absdiff": 0.0,
         "mismatches": [],
         "word_mismatch_list": [],
+        "tagger_pathology": [],
     }
     import numpy as np
 
@@ -141,6 +142,7 @@ def main() -> int:
         words, ids, mask = tagger_input(sent)
         lengths = [len(tok.encode(" " + w, add_special_tokens=False).ids) or 1 for w in words]
         lv = tag_v.run(None, {"input_ids": ids, "attention_mask": mask})[0]
+        lv = np.ascontiguousarray(lv, dtype=np.float32)
         # per-word argmax follows english.rs: the last non-I- subword label wins
         pv_idx = 1
         v_words = []
@@ -167,13 +169,16 @@ def main() -> int:
             res["invalid_trees"].append({"text": sent, "reason": why, "heads": heads})
         if not have_ref:
             continue
-        lr = tag_r.run(None, {"input_ids": ids, "attention_mask": mask})[0]
+        lr = np.ascontiguousarray(tag_r.run(None, {"input_ids": ids, "attention_mask": mask})[0],
+                                  dtype=np.float32)
         ar = par_r.run(None, {
             "subword_ids": np.array([sub_ids], dtype=np.int64).reshape(1, rows, F),
             "word_ids": np.array([word_ids], dtype=np.int64),
             "piece_order": np.array([order], dtype=np.int64),
         })
         res["max_logit_absdiff"] = max(res["max_logit_absdiff"], float(np.abs(lv - lr).max()))
+        if int((lv[0].argmax(-1) != lr[0].argmax(-1)).sum()) > len(words):
+            res["tagger_pathology"].append(sent)
         res["max_arc_absdiff"] = max(res["max_arc_absdiff"], float(np.abs(ao[0] - ar[0]).max()))
         av = lv[0].argmax(-1).tolist()
         ar_ = lr[0].argmax(-1).tolist()

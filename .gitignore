@@ -9,3 +9,8 @@
 
 /dist-release.*
 .wrangler/
+
+# spike crate build (do not commit ONNX Runtime build tree)
+spikes/nlp_models/target/
+**/__pycache__/
+*.pyc

@@ -16,7 +16,7 @@ devtools = []
 
 # `fdl_core` is the GPUI-free document engine; plain `cargo test` covers both.
 [workspace]
-members = ["crates/core"]
+members = ["crates/core", "crates/reader_nlp"]
 default-members = [".", "crates/core"]
 
 [dependencies]

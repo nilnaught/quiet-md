@@ -1,0 +1,157 @@
+# Trial packages for the reader-phase1 branch: unsigned macOS arm64 zip and
+# Windows x64 installer, with LTP/small + English base-int8 models bundled.
+# Not for official distribution (no Developer ID / no Authenticode).
+name: Trial packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/reader-phase1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trial-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: macOS arm64 trial
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SIGNING_IDENTITY: "-"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download NLP models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HOME/nlp-models"
+          gh release download models-v1 --repo "${{ github.repository }}" --pattern 'quiet-md-models-v1.zip' --dir /tmp
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          dest = Path.home() / "nlp-models"
+          dest.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile("/tmp/quiet-md-models-v1.zip") as z:
+              z.extractall(dest)
+          print("extracted to", dest)
+          PY
+          echo "QUIET_MD_NLP_MODELS=$HOME/nlp-models/models" >> "$GITHUB_ENV"
+          ls -la "$HOME/nlp-models/models" "$HOME/nlp-models/models/en-upos-base/onnx-int8" | head
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+
+      - name: Package
+        run: scripts/release.sh
+
+      - name: Verify models in the zip
+        run: |
+          zip=$(ls -1 dist-release.*/quiet-md-*-macos-arm64-unsigned.zip | head -1)
+          echo "archive $zip ($(wc -c < "$zip") bytes)"
+          unzip -l "$zip" | python3 -c 'import sys
+          lines=sys.stdin.read()
+          need=["Contents/Resources/models/NOTICE.md","Contents/Resources/models/ltp-small/onnx/ltp_small_cws_pos_dep.onnx","Contents/Resources/models/en-upos-base/onnx-int8/en_upos_tagger.onnx","Contents/Resources/models/en-upos-base/onnx-int8/en_upos_tagger.onnx.data"]
+          missing=[n for n in need if n not in lines]
+          print(lines)
+          if missing:
+              raise SystemExit("missing: "+", ".join(missing))
+          print("models present")
+          '
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-macos-arm64
+          path: |
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip
+            dist-release.*/quiet-md-*-macos-arm64-unsigned.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-x64:
+    name: Windows x64 trial
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download NLP models
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HOME/nlp-models"
+          gh release download models-v1 --repo "${{ github.repository }}" --pattern 'quiet-md-models-v1.zip' --dir /tmp
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          dest = Path.home() / "nlp-models"
+          dest.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile("/tmp/quiet-md-models-v1.zip") as z:
+              z.extractall(dest)
+          print("extracted to", dest)
+          PY
+          echo "QUIET_MD_NLP_MODELS=$HOME/nlp-models/models" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools were not found' }
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          & scripts/package-windows.ps1 -Iscc "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+
+      - name: Verify models in the portable zip
+        shell: bash
+        run: |
+          ls -lh dist/windows/unsigned/quiet-md-*-windows-x64*
+          zip=$(ls -1 dist/windows/unsigned/quiet-md-*-windows-x64.zip | head -1)
+          python3 - <<PY
+          import zipfile, sys
+          path = r"""$zip"""
+          need = [
+              "models/NOTICE.md",
+              "models/ltp-small/onnx/ltp_small_cws_pos_dep.onnx",
+              "models/en-upos-base/onnx-int8/en_upos_tagger.onnx",
+              "models/en-upos-base/onnx-int8/en_upos_tagger.onnx.data",
+              "quiet_md.exe",
+          ]
+          with zipfile.ZipFile(path) as z:
+              names = z.namelist()
+          print("\n".join(sorted(names)[:80]), "...", len(names), "entries")
+          missing = [n for n in need if n not in names and not any(x.endswith(n) or x.endswith(n.replace("/", "\\")) for x in names)]
+          # Compress-Archive may prefix with a folder or use backslashes.
+          def has(n):
+              n1 = n.replace("\\", "/")
+              return any(x.replace("\\", "/").endswith(n1) or x.replace("\\", "/") == n1 for x in names)
+          missing = [n for n in need if not has(n)]
+          if missing:
+              raise SystemExit("missing: " + ", ".join(missing) + "\nnames sample: " + repr(names[:20]))
+          print("models + exe present")
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-windows-x64
+          path: |
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe.sha256
+            dist/windows/unsigned/quiet-md-*-windows-x64.zip
+            dist/windows/unsigned/quiet-md-*-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -49,7 +49,6 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         run: |
           rustup component add clippy
-          rustup target add x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.filter.outputs.skip != 'true'
@@ -74,18 +73,8 @@ jobs:
           SIGNING_IDENTITY: '-'
         run: scripts/release.sh
 
-      - name: Cross-compile and package Intel
-        if: steps.filter.outputs.skip != 'true'
-        env:
-          SIGNING_IDENTITY: '-'
-          MACOS_TARGET: x86_64-apple-darwin
-        run: scripts/release.sh
-
-      - name: Test Intel update validation under Rosetta
-        if: steps.filter.outputs.skip != 'true'
-        run: |
-          sudo softwareupdate --install-rosetta --agree-to-license
-          cargo test --release --locked --target x86_64-apple-darwin --bin quiet_md update::tests
+      # ort 2.0.0-rc.15 has no official x86_64-apple-darwin (Intel Mac) prebuilt.
+      # Trial packages target Apple Silicon only until a vendored ORT is added.
 
       - name: Upload macOS validation packages
         if: steps.filter.outputs.skip != 'true'
@@ -159,7 +148,8 @@ jobs:
 
   linux-build:
     name: Linux x64 build + checks
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04: ort 2.0.0-rc.15 prebuilts need glibc 2.38+ (__isoc23_strtol).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

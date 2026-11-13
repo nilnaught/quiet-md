@@ -29,6 +29,8 @@ app="$out/quiet.md.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/"
 cp LICENSE THIRD_PARTY.md "$app/Contents/Resources/"
+scripts/bundle-ort-runtime.sh "$(dirname "$binary")" "$app/Contents/MacOS"
+scripts/bundle-nlp-models.sh "$app/Contents/Resources/models"
 icons="$out/AppIcon.iconset"
 mkdir -p "$icons"
 for size in 16 32 128 256 512; do

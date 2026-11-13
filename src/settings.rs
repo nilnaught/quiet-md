@@ -577,14 +577,13 @@ impl Workspace {
             refresh_all(self, cx);
         }
         // 阅读标注: its options change what the editor draws, not the document.
-        if p.reader_marks != old.reader_marks || p.reader_nouns != old.reader_nouns || p.reader_verbs != old.reader_verbs
+        if (p.reader_marks != old.reader_marks || p.reader_nouns != old.reader_nouns || p.reader_verbs != old.reader_verbs
             || p.reader_adjs != old.reader_adjs || p.reader_advs != old.reader_advs || p.reader_connectives != old.reader_connectives
             || p.reader_nonfinite != old.reader_nonfinite || p.reader_core != old.reader_core || p.reader_dim != old.reader_dim
-            || p.reader_unit != old.reader_unit
+            || p.reader_unit != old.reader_unit)
+            && let Some(ed) = &self.editor
         {
-            if let Some(ed) = &self.editor {
-                ed.update(cx, |e, cx| { e.cache.borrow_mut().clear(); cx.notify(); });
-            }
+            ed.update(cx, |e, cx| { e.cache.borrow_mut().clear(); cx.notify(); });
         }
         if p.reader_model != old.reader_model && !p.reader_model.is_empty() {
             restart_nlp();

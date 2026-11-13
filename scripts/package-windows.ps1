@@ -32,6 +32,13 @@ try {
     $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item target/release/quiet_md.exe $stage -Force
+    Get-ChildItem target/release -Filter 'onnxruntime*.dll' -ErrorAction SilentlyContinue | Copy-Item -Destination $stage -Force
+    Get-ChildItem target/release -Filter 'libonnxruntime*.dll' -ErrorAction SilentlyContinue | Copy-Item -Destination $stage -Force
+    if ($env:QUIET_MD_NLP_MODELS -or $env:MODELS_DIR) {
+        $bundle = Join-Path $root 'scripts/bundle-nlp-models.sh'
+        & bash $bundle "$stage/models"
+        if ($LASTEXITCODE -ne 0) { throw 'NLP model bundling failed' }
+    }
     if (!$env:VCToolsRedistDir) { throw 'Run from a Visual Studio developer shell to locate the C++ runtime' }
     $runtime = Get-ChildItem (Join-Path $env:VCToolsRedistDir 'x64/Microsoft.VC*.CRT/vcruntime140.dll') | Select-Object -First 1
     if (!$runtime) { throw 'The redistributable x64 vcruntime140.dll was not found' }
@@ -60,4 +67,12 @@ try {
     [System.IO.File]::WriteAllText("$installer.sha256", "$hash  $name`n", [System.Text.Encoding]::ASCII)
     Copy-Item $installer, "$installer.sha256" $output -Force
     Write-Output "$mode installer: $(Join-Path $output $name)"
+    $zipName = "quiet-md-$version-windows-x64.zip"
+    $zipPath = Join-Path $output $zipName
+    if (Test-Path $zipPath) { Remove-Item $zipPath }
+    $portable = Get-ChildItem $stage | Where-Object { $_.Name -notmatch '^quiet-md-.*-windows-x64-setup\.exe' }
+    Compress-Archive -Path $portable.FullName -DestinationPath $zipPath -CompressionLevel Fastest
+    $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [System.IO.File]::WriteAllText("$zipPath.sha256", "$zipHash  $zipName`n", [System.Text.Encoding]::ASCII)
+    Write-Output "$mode portable zip: $zipPath"
 } finally { Pop-Location }

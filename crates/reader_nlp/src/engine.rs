@@ -41,11 +41,22 @@ impl Default for NlpOptions {
     }
 }
 
-/// `$QUIET_MD_NLP_MODELS`, else `/workspace/models` on this box, else
-/// `<cwd>/models`.
+/// Resolution order:
+/// 1. `$QUIET_MD_NLP_MODELS`
+/// 2. the models directory bundled with the app (macOS
+///    `Contents/Resources/models`, or a `models/` folder next to the
+///    executable on Windows / Linux)
+/// 3. `/workspace/models` when that path exists (this development box)
+/// 4. `<cwd>/models`
+///
+/// A missing directory is fine: [`NlpEngine::analyze`] stays on the
+/// jieba / english-pos-tagger fallback.
 fn default_models_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("QUIET_MD_NLP_MODELS") {
         return PathBuf::from(dir);
+    }
+    if let Some(dir) = bundled_models_dir() {
+        return dir;
     }
     let box_default = PathBuf::from("/workspace/models");
     if box_default.is_dir() {
@@ -54,6 +65,21 @@ fn default_models_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("models")
+}
+
+/// `Some` only when the bundled folder is already on disk.
+fn bundled_models_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // Quiet.md.app/Contents/MacOS/quiet_md → ../Resources/models
+    if dir.file_name().is_some_and(|n| n == "MacOS") {
+        let resources = dir.parent()?.join("Resources").join("models");
+        if resources.is_dir() {
+            return Some(resources);
+        }
+    }
+    let next = dir.join("models");
+    next.is_dir().then_some(next)
 }
 
 #[derive(Default)]

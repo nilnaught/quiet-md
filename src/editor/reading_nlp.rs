@@ -395,7 +395,7 @@ fn unit_pos(offsets: &HashMap<BlockId, Option<usize>>, doc: &Document, at: usize
         let Some(Some(o)) = offsets.get(&b.id) else { return };
         if *o <= at && !b.text.is_empty() {
             let end = *o + b.text.plain_text().len();
-            let dist = if at < end { 0 } else { at - end };
+            let dist = at.saturating_sub(end);
             if best.is_none_or(|(d, _)| dist < d) {
                 best = Some((dist, b.id));
             }
